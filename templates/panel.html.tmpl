@@ -275,6 +275,13 @@
         .url-list a:hover { text-decoration: underline; }
         .url-list b { color: var(--text2); min-width: 120px; display: inline-block; }
 
+        /* ── Geo Data Tab ── */
+        .geo-steps {
+            margin: 12px 0 0; padding-left: 20px; font-size: 13px; color: var(--text);
+        }
+        .geo-steps li { margin-bottom: 4px; line-height: 1.5; }
+        .geo-steps li::marker { color: var(--accent); font-weight: 600; }
+
         /* ── Animations ── */
         @keyframes fadeIn {
             from { opacity: 0; }
@@ -334,6 +341,7 @@
         <div class="tab active" onclick="switchTab('http')">🌐 HTTP Tunnel</div>
         <div class="tab" onclick="switchTab('local')">🔒 Local</div>
         <div class="tab" onclick="switchTab('programs')">📱 Programs</div>
+        <div class="tab" onclick="switchTab('geo')">🌍 Geo Data</div>
     </div>
 
     <!-- ════ HTTP Tunnel Tab ════ -->
@@ -375,6 +383,15 @@
             into your preferred client.
         </div>
         <div id="programs-list"></div>
+    </div>
+
+    <!-- ════ Geo Data Tab ════ -->
+    <div id="tab-geo" class="section">
+        <div class="stealth-note">
+            <strong>🌍 Geo Databases</strong> — Client-side routing rules (GEOIP / GEOSITE) hosted on
+            this server and refreshed from the Iran rules releases on every deploy.
+        </div>
+        <div id="geo-list"></div>
     </div>
 
     <!-- ════ QR Modal ════ -->
@@ -464,7 +481,7 @@
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         const tabEls = document.querySelectorAll('.tab');
-        const idx = ['http', 'local', 'programs'].indexOf(name);
+        const idx = ['http', 'local', 'programs', 'geo'].indexOf(name);
         if (tabEls[idx]) tabEls[idx].classList.add('active');
         const section = document.getElementById('tab-' + name);
         if (section) section.classList.add('active');
@@ -620,9 +637,65 @@
         }
     }
 
+    // ─── Build Geo Data Tab ───────────────────────────────────────────────────
+
+    function buildGeo() {
+        const gc = document.getElementById('geo-list');
+        if (!gc) return;
+
+        const geo = {
+            'Shadowrocket (iOS)': {
+                tag: '🌐',
+                intro: 'Shadowrocket downloads the GEOIP database itself — point it at the URL below and it will auto-refresh on its own schedule.',
+                steps: [
+                    'Open Shadowrocket → <b>Settings</b> → <b>GeoLite2 数据库</b>.',
+                    'In <b>Country</b> (国家/地区), paste the Country.mmdb URL, then tap <b>更新</b>.',
+                    'Optional: in <b>ASN</b>, paste the GeoLite2-ASN.mmdb URL and tap <b>更新</b>.',
+                    'Done — routing rules using GEOIP will resolve correctly.',
+                ],
+                links: [
+                    ['Country.mmdb', 'https://${DOMAIN}/geo/Country.mmdb'],
+                    ['GeoLite2-ASN.mmdb', 'https://${DOMAIN}/geo/GeoLite2-ASN.mmdb'],
+                ],
+            },
+            'NekoBox (Android)': {
+                tag: '🟣',
+                intro: 'NekoBox has no custom-URL updater (it only syncs from its own built-in GitHub providers), so download the .db files here and import them manually. Import once per install; each new server deploy refreshes the files at the same URL.',
+                steps: [
+                    'Tap the download links below (or open them in your browser) to save <b>geoip.db</b> and <b>geosite.db</b>.',
+                    'Open NekoBox → <b>Menu</b> (⋮) → <b>Import</b> → <b>Import from file</b>.',
+                    'Pick the downloaded <b>geoip.db</b> — it installs as the GEOIP database.',
+                    'Repeat with <b>geosite.db</b> — it installs as the GEOSITE database.',
+                    'Restart the connection for the new databases to take effect.',
+                ],
+                links: [
+                    ['geoip.db', 'https://${DOMAIN}/geo/geoip.db'],
+                    ['geosite.db', 'https://${DOMAIN}/geo/geosite.db'],
+                ],
+            },
+        };
+
+        for (const [name, info] of Object.entries(geo)) {
+            const div = document.createElement('div');
+            div.className = 'program-section';
+            div.innerHTML =
+                '<h4>' + info.tag + ' ' + name + '</h4>' +
+                '<div style="color:var(--text2);font-size:13px;line-height:1.6;margin-bottom:4px;">' + info.intro + '</div>' +
+                '<ol class="geo-steps">' + info.steps.map(s => '<li>' + s + '</li>').join('') + '</ol>' +
+                '<ul class="url-list" style="margin-top:10px;">' +
+                info.links.map(l =>
+                    '<li><b>' + l[0] + ':</b> <a href="' + l[1] + '">' + l[1] + '</a> ' +
+                    '<button class="btn primary" style="padding:6px 12px;font-size:12px;margin-left:6px;" onclick="copyToClipboard(\'' + l[1] + '\', this)">📋 Copy</button></li>'
+                ).join('') +
+                '</ul>';
+            gc.appendChild(div);
+        }
+    }
+
     // ─── Init ──────────────────────────────────────────────────────────────────
     renderCards();
     buildPrograms();
+    buildGeo();
 </script>
 </body>
 </html>

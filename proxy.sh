@@ -5,6 +5,7 @@ set -euo pipefail
 XRAY_DIR="${PWD}"
 XRAY_CONFIG_FILE="${XRAY_DIR}/config.json"
 XRAY_BIN="${XRAY_DIR}/xray"
+GEO_DIR="${XRAY_DIR}/geo"
 NGINX_CONF="${XRAY_DIR}/nginx.conf"
 SUB_DIR="${XRAY_DIR}/sub"
 LOG_DIR="${XRAY_DIR}/logs"
@@ -267,6 +268,71 @@ PATH_VMESS_HU="/$(derive_hex path/vmess-hu 16)"
 log "Rendering config files from templates..."
 mkdir -p "$SUB_DIR" "$LOG_DIR"
 
+# ─── Download geo databases (Iran rules) ────────────────────────────────────
+# Hosted on this server so clients don't depend on GitHub for geo data.
+#   Country.mmdb          → Shadowrocket (Settings → GeoLite2 数据库)
+#   geoip.dat/geosite.dat → xray-family clients (v2rayN / v2rayNG)
+#   geoip.db/geosite.db   → sing-box clients (NekoBox — manual import)
+download_geo() {
+    mkdir -p "$GEO_DIR"
+    # repo | comma-separated asset names to grab from that repo's latest release
+    local -a sources=(
+        "Chocolate4U/Iran-v2ray-rules|Country.mmdb,geoip.dat,geosite.dat"
+        "Chocolate4U/Iran-sing-box-rules|geoip.db,geosite.db"
+    )
+
+    local entry repo assets release_json asset url sum_url expected actual ok attempt
+    for entry in "${sources[@]}"; do
+        repo="${entry%%|*}"
+        assets="${entry#*|}"
+        release_json=$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/latest") || {
+            warn "geo: could not query ${repo} — skipping (clients will 404 on geo files)"
+            continue
+        }
+        for asset in ${assets//,/ }; do
+            url=$(echo "$release_json" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+for a in r.get('assets',[]):
+    if a['name']=='${asset}': print(a['browser_download_url']); break
+")
+            if [[ -z "$url" ]]; then
+                warn "geo: asset ${asset} not found in ${repo} — skipping"
+                continue
+            fi
+            sum_url=$(echo "$release_json" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+for a in r.get('assets',[]):
+    if a['name']=='${asset}.sha256sum': print(a['browser_download_url']); break
+")
+            ok=0
+            for attempt in 1 2; do
+                if curl -fsSL --max-time 120 -o "${GEO_DIR}/${asset}" "$url"; then
+                    if [[ -n "$sum_url" ]] && curl -fsSL --max-time 30 -o "${GEO_DIR}/${asset}.sha256sum" "$sum_url"; then
+                        expected=$(awk '{print $1}' "${GEO_DIR}/${asset}.sha256sum")
+                        actual=$(sha256sum "${GEO_DIR}/${asset}" | awk '{print $1}')
+                        rm -f "${GEO_DIR}/${asset}.sha256sum"
+                        if [[ "$expected" == "$actual" ]]; then ok=1; break; fi
+                        warn "geo: ${asset} checksum mismatch (attempt ${attempt}/2)"
+                    else
+                        ok=1; break   # no checksum published — accept download
+                    fi
+                else
+                    warn "geo: ${asset} download failed (attempt ${attempt}/2)"
+                fi
+                sleep 2
+            done
+            if [[ "$ok" == "1" ]]; then
+                log "geo: ${asset} ready ($(du -h "${GEO_DIR}/${asset}" | cut -f1))"
+            else
+                warn "geo: ${asset} unavailable — clients will 404 on it"
+            fi
+        done
+    done
+}
+download_geo
+
 export XRAY_LOG="${LOG_DIR}/xray.log" \
   XRAY_DIR LOG_DIR SUB_DIR PORT_NGINX \
   PORT_VLESS PORT_TROJAN PORT_VMESS PORT_VLESS_GRPC PORT_TROJAN_GRPC \
@@ -302,7 +368,7 @@ json.dump(cfg, open(p, 'w'), indent=2)
 fi
 
 # For nginx: only expand OUR variables, leave nginx's own vars ($http_upgrade, etc.)
-NGINX_VARS='$XRAY_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU'
+NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU'
 envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 
 # ─── Start xray first ────────────────────────────────────────────────────────
@@ -481,6 +547,11 @@ echo -e "  ${GRN}HTTPUpgrade${NC}   VLESS | Trojan | VMess"
 echo ""
 echo "── 🔒 Local Only ────────────────────────────────"
 echo -e "  Shadowsocks :${PORT_SHADOWSOCKS}  Reality:${PORT_REALITY}  SOCKS5:${PORT_SOCKS5}  HTTP:${PORT_HTTP_PROXY}"
+echo ""
+echo "── 🌍 Geo Data (Iran rules) ─────────────────────────"
+echo -e "  Shadowrocket : https://${DOMAIN}/geo/Country.mmdb"
+echo -e "  NekoBox      : https://${DOMAIN}/geo/geoip.db  |  geosite.db"
+echo -e "  Xray desktop : https://${DOMAIN}/geo/geoip.dat  |  geosite.dat"
 echo ""
 echo "── 🛡️  Stealth ───────────────────────────────────"
 if [[ "$WARP_ACTIVE" == "true" ]]; then

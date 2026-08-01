@@ -112,6 +112,13 @@ http {
             proxy_connect_timeout 86400;
         }
 
+        # ── Geo databases (client-side routing rules) ────────────────
+        location /geo/ {
+            alias $GEO_DIR/;
+            default_type application/octet-stream;
+            add_header Cache-Control "public, max-age=3600";
+        }
+
         location /panel {
             root $SUB_DIR;
             try_files $uri /panel.html;
