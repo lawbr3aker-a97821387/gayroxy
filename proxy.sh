@@ -275,37 +275,21 @@ mkdir -p "$SUB_DIR" "$LOG_DIR"
 #   geoip.db/geosite.db   → sing-box clients (NekoBox — manual import)
 download_geo() {
     mkdir -p "$GEO_DIR"
-    # repo | comma-separated asset names to grab from that repo's latest release
+    # repo | comma-separated asset names to grab from that repo's latest release.
+    # Uses the stable /releases/latest/download/ redirect (no api.github.com call —
+    # unauthenticated API calls get rate-limited on shared runner egress IPs).
     local -a sources=(
         "Chocolate4U/Iran-v2ray-rules|Country.mmdb,geoip.dat,geosite.dat"
         "Chocolate4U/Iran-sing-box-rules|geoip.db,geosite.db"
     )
 
-    local entry repo assets release_json asset url sum_url expected actual ok attempt
+    local entry repo assets asset url sum_url expected actual ok attempt
     for entry in "${sources[@]}"; do
         repo="${entry%%|*}"
         assets="${entry#*|}"
-        release_json=$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/latest") || {
-            warn "geo: could not query ${repo} — skipping (clients will 404 on geo files)"
-            continue
-        }
         for asset in ${assets//,/ }; do
-            url=$(echo "$release_json" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-for a in r.get('assets',[]):
-    if a['name']=='${asset}': print(a['browser_download_url']); break
-")
-            if [[ -z "$url" ]]; then
-                warn "geo: asset ${asset} not found in ${repo} — skipping"
-                continue
-            fi
-            sum_url=$(echo "$release_json" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-for a in r.get('assets',[]):
-    if a['name']=='${asset}.sha256sum': print(a['browser_download_url']); break
-")
+            url="https://github.com/${repo}/releases/latest/download/${asset}"
+            sum_url="https://github.com/${repo}/releases/latest/download/${asset}.sha256sum"
             ok=0
             for attempt in 1 2; do
                 if curl -fsSL --max-time 120 -o "${GEO_DIR}/${asset}" "$url"; then
