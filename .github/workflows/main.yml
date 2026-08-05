@@ -1,14 +1,11 @@
-name: Build & Deploy ${{ github.run_id }}
+name: Build & Deploy Proxy
+run-name: Build & Deploy ${{ github.run_id }}
+
 
 on:
   push:
     branches: [ master, main ]
-  workflow_dispatch:
-    inputs:
-      external_urls:
-        description: 'External subscription URLs (comma-separated, overrides secret)'
-        required: false
-        type: string
+  workflow_dispatch: {}
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  ⚠️  STEALTH CONFIGURATION
@@ -31,6 +28,9 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
+
     timeout-minutes: 240
 
     steps:
@@ -52,7 +52,7 @@ jobs:
         env:
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
           CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
-          EXTERNAL_SUB_URLS: ${{ inputs.external_urls || secrets.EXTERNAL_SUB_URLS || '' }}
+          EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
         run: |
           mkdir -p logs
           echo "::group::Proxy Output"
