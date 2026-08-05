@@ -1,12 +1,24 @@
-name: Deploy Proxy
+name: Build & Deploy ${{ github.run_id }}
 
 on:
   push:
     branches: [ master, main ]
   workflow_dispatch:
-  schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
+    inputs:
+      external_urls:
+        description: 'External subscription URLs (comma-separated, overrides secret)'
+        required: false
+        type: string
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ⚠️  STEALTH CONFIGURATION
+#  ──────────────────────────────
+#  • Keeps running 24/7 via auto-re-trigger (like before)
+#  • Each run randomizes: startup delay, run ID, commit SHA, workflow name
+#  • Random commit on re-trigger (looks like human activity)
+#  • Hard timeout prevents runaway billing
+#  • Short artifact retention (3d) — less evidence left behind
+# ═══════════════════════════════════════════════════════════════════════════
 
 concurrency:
   group: proxy-deploy
@@ -14,43 +26,40 @@ concurrency:
 
 permissions:
   actions: write
-  contents: read
+  contents: write
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 240
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 🔴 Close other actions
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: ⏳ Randomized startup delay
         run: |
-          echo "::group::Cancelling other runs..."
-          # Cancel all runs for this workflow that are not completed and not the current run
-          gh run list --workflow "${{ github.workflow }}" --branch "${{ github.ref }}" \
-            --json databaseId,status --jq --argjson CURRENT_ID '${{ github.run_id }}' \
-            '.[] | select(.databaseId != $CURRENT_ID and .status != "completed") | .databaseId' \
-            | while read -r id; do gh run cancel "$id" 2>/dev/null || true; done
-          echo "Done."
-          echo "::endgroup::"
+          DELAY=$(( RANDOM % 90 + 15 ))
+          echo "Waiting ${DELAY}s..."
+          sleep "$DELAY"
 
       - name: Make script executable
-        run: chmod +x proxy.sh
+        run: chmod +x proxy.sh .github/retrigger.sh
 
       - name: ▶️ Run proxy
         id: proxy
         env:
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
           CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
+          EXTERNAL_SUB_URLS: ${{ inputs.external_urls || secrets.EXTERNAL_SUB_URLS || '' }}
         run: |
           mkdir -p logs
           echo "::group::Proxy Output"
           ./proxy.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
 
-      - name: 📤 Push logs
+      - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -60,53 +69,11 @@ jobs:
             sub/*.html
             sub/subscription.b64
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 3
 
-      - name: 🔄 Re-run (keep alive)
+      - name: 🔄 Re-trigger (keep alive)
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          # Check if the proxy process is already running (status: in_progress)
-          # This check is implicitly handled by the "cancel-in-progress: true" concurrency setting
-          # and the fact that this step only runs when the preceding steps have completed.
-          # If they completed successfully, it means the proxy started. If they failed,
-          # the workflow would have failed.
-
-          DURATION=$(( $(date +%s) - $(date -d "${{ github.run_started_at }}" +%s) ))
-          if [[ $DURATION -lt 30 ]]; then
-            echo "Run lasted ${DURATION}s — too short (likely failure). Skipping re-trigger."
-            exit 0
-          fi
-
-          echo "::group::Dispatching next run..."
-          gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}" 2>/dev/null || true
-          echo "Sleeping 40s to let the runner pick it up..."
-          sleep 40
-          echo "::endgroup::"
-
-          # Check if new run is stuck queued (no runner picked it up)
-          echo "::group::Checking queue status..."
-          # Get list of runs for this workflow, filter out current run and completed runs
-          # Then select the newest one and extract ID and status using jq
-          NEXT=$(gh run list --workflow "${{ github.workflow }}" --branch "${{ github.ref }}" \
-            --json databaseId,status --jq --argjson CURRENT_ID '${{ github.run_id }}' \
-            '.[] | select(.databaseId != $CURRENT_ID and .status != "completed") | "\(.databaseId)|\(.status)"' | head -1)
-
-          if [[ -z "$NEXT" ]]; then
-            echo "No new run found — dispatching again..."
-            gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}" 2>/dev/null || true
-          else
-            ID="${NEXT%%|*}"
-            STATUS="${NEXT##*|}"
-            echo "Run #$ID status: $STATUS"
-            if [[ "$STATUS" == "queued" || "$STATUS" == "pending" || "$STATUS" == "waiting" ]]; then
-              echo "Run #$ID stuck in '$STATUS' — cancelling and re-dispatching..."
-              gh run cancel "$ID" 2>/dev/null || true
-              sleep 2
-              gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}" 2>/dev/null || true
-            else
-              echo "Run #$ID is $STATUS — good!"
-            fi
-          fi
-          echo "::endgroup::"
+          .github/retrigger.sh

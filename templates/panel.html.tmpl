@@ -334,7 +334,7 @@
         <h1>Gayroxy</h1>
         <div class="subtitle">Multi-Protocol Proxy Suite</div>
     </div>
-    <div class="summary">⚡ 15 configs · 1 domain · ∞ possibilities</div>
+    <div class="summary">⚡ <span id="gayroxy-count">15</span> gayroxy · <span id="external-count">0</span> external · <span id="total-count">15</span> total configs</div>
 
     <!-- ── Tabs ── -->
     <div class="tabs">
@@ -342,6 +342,7 @@
         <div class="tab" onclick="switchTab('local')">🔒 Local</div>
         <div class="tab" onclick="switchTab('programs')">📱 Programs</div>
         <div class="tab" onclick="switchTab('geo')">🌍 Geo Data</div>
+        <div class="tab" onclick="switchTab('external')" id="tab-external-btn">🔗 External Subs</div>
     </div>
 
     <!-- ════ HTTP Tunnel Tab ════ -->
@@ -392,6 +393,28 @@
             this server and refreshed from the Iran rules releases on every deploy.
         </div>
         <div id="geo-list"></div>
+    </div>
+
+    <!-- ════ External Subs Tab ════ -->
+    <div id="tab-external" class="section">
+        <div class="sub-box">
+            <h2>🔗 Merged Subscription</h2>
+            <div class="sub-inner">
+                <div class="sub-text">
+                    <div class="sub-url" id="sub-url">https://${DOMAIN}/sub</div>
+                    <button class="btn primary" onclick="copySub()">📋 Copy Merged Sub</button>
+                    <div style="margin-top:10px;font-size:12px;color:var(--text2);">
+                        Contains all gayroxy configs + fetched external subscriptions.
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="stealth-note">
+            <strong>🔗 External Subscriptions</strong> — These are fetched at deploy time
+            and merged into <code>/sub</code>. If a source is offline, it is skipped but
+            the remaining sources and gayroxy configs are still included.
+        </div>
+        <div id="external-list"></div>
     </div>
 
     <!-- ════ QR Modal ════ -->
@@ -481,7 +504,7 @@
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         const tabEls = document.querySelectorAll('.tab');
-        const idx = ['http', 'local', 'programs', 'geo'].indexOf(name);
+        const idx = ['http', 'local', 'programs', 'geo', 'external'].indexOf(name);
         if (tabEls[idx]) tabEls[idx].classList.add('active');
         const section = document.getElementById('tab-' + name);
         if (section) section.classList.add('active');
@@ -690,10 +713,58 @@
         }
     }
 
+    // ─── Build External Subs Tab ──────────────────────────────────────────────
+
+    function buildExternal() {
+        const el = document.getElementById('external-list');
+        if (!el) return;
+
+        // Get external sub URLs from DATA
+        const urls = (D.EXTERNAL_SUB_URLS || '').split(',').map(u => u.trim()).filter(Boolean);
+
+        if (urls.length === 0) {
+            el.innerHTML = '<div class="stealth-note" style="text-align:center;border-left-color:var(--text2);">' +
+                '<strong>ℹ️ No external subscriptions configured.</strong><br>' +
+                '<span style="font-size:13px;">Set <code>EXTERNAL_SUB_URLS</code> as a GitHub secret or env variable<br>' +
+                'e.g. <code>EXTERNAL_SUB_URLS=https://sub1.example.com/sub,https://sub2.example.com/sub</code></span></div>';
+            return;
+        }
+
+        for (const url of urls) {
+            const div = document.createElement('div');
+            div.className = 'program-section';
+            div.innerHTML =
+                '<h4>🔗 <span style="color:var(--text2);font-weight:400;">Source:</span> ' +
+                '<a href="' + url + '" target="_blank" style="color:var(--accent);text-decoration:none;word-break:break-all;">' + url + '</a></h4>' +
+                '<div style="color:var(--text2);font-size:13px;">' +
+                '  <span style="color:var(--accent4);">⏱</span> Fetched at deploy time and merged into <code>/sub</code>' +
+                '</div>';
+            el.appendChild(div);
+        }
+    }
+
+    // ─── Build Counts from DATA ────────────────────────────────────────────────
+
+    function buildCounts() {
+        const gayroxy = parseInt(D.GAYROXY_SUB_COUNT) || 15;
+        const external = parseInt(D.EXTERNAL_SUB_COUNT) || 0;
+        const total = parseInt(D.TOTAL_SUB_COUNT) || gayroxy;
+
+        const gc = document.getElementById('gayroxy-count');
+        const ec = document.getElementById('external-count');
+        const tc = document.getElementById('total-count');
+
+        if (gc) gc.textContent = gayroxy;
+        if (ec) ec.textContent = external;
+        if (tc) tc.textContent = total;
+    }
+
     // ─── Init ──────────────────────────────────────────────────────────────────
     renderCards();
     buildPrograms();
     buildGeo();
+    buildExternal();
+    buildCounts();
 </script>
 </body>
 </html>

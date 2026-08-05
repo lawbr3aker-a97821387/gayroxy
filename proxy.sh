@@ -471,6 +471,56 @@ ${HTTP_URL}"
 SUB_B64=$(echo -n "$SUB_CONTENT" | base64 -w 0)
 echo -n "$SUB_B64" > "${SUB_DIR}/subscription.b64"
 
+# ─── Merge External Subscriptions ─────────────────────────────────────────────
+# EXTERNAL_SUB_URLS: comma-separated list of subscription URLs to merge
+# Set as GitHub secret or env var: EXTERNAL_SUB_URLS="https://sub1.com/sub,https://sub2.com/sub"
+merge_external_subs() {
+    local combined="$SUB_CONTENT"
+    local external_count=0
+    local gayroxy_count=$(echo -n "$SUB_CONTENT" | grep -c '^' || echo 0)
+
+    if [[ -n "${EXTERNAL_SUB_URLS:-}" ]]; then
+        IFS=',' read -ra URLS <<< "$EXTERNAL_SUB_URLS"
+        for url in "${URLS[@]}"; do
+            url=$(echo "$url" | xargs)  # trim whitespace
+            [[ -z "$url" ]] && continue
+            log "Fetching external sub: $url"
+            local ext_content
+            ext_content=$(curl -sL --max-time 15 --retry 2 --retry-delay 3 "$url" 2>/dev/null || true)
+            if [[ -z "$ext_content" ]]; then
+                warn "  ✗ Failed to fetch: $url"
+                continue
+            fi
+            # Try decode if base64 encoded
+            if echo "$ext_content" | base64 -d &>/dev/null; then
+                ext_content=$(echo "$ext_content" | base64 -d 2>/dev/null || echo "$ext_content")
+            fi
+            # Count valid lines (skip empty/comments)
+            local added
+            added=$(echo "$ext_content" | grep -E '^(vless|vmess|trojan|ss|shadowsocks)://' | wc -l)
+            if [[ "$added" -gt 0 ]]; then
+                combined+=$'\n'"$ext_content"
+                external_count=$((external_count + added))
+                log "  ✓ Merged $added links from $url"
+            else
+                warn "  ⚠ No valid links found in: $url"
+            fi
+        done
+    fi
+
+    # Update SUB_CONTENT and SUB_B64 with merged result
+    SUB_CONTENT="$combined"
+    SUB_B64=$(echo -n "$SUB_CONTENT" | base64 -w 0)
+    echo -n "$SUB_B64" > "${SUB_DIR}/subscription.b64"
+
+    # Export for panel template
+    export EXTERNAL_SUB_COUNT=$external_count
+    export GAYROXY_SUB_COUNT=$gayroxy_count
+    export TOTAL_SUB_COUNT=$((gayroxy_count + external_count))
+}
+
+merge_external_subs
+
 # ─── Render HTML templates (after tunnel — we have the domain & URLs) ────────
 log "Rendering HTML pages..."
 envsubst '$DOMAIN' < templates/index.html.tmpl > "${SUB_DIR}/index.html"
@@ -508,6 +558,7 @@ keys = [
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
     'REALITY_PUBLIC','SUB_B64','DOMAIN',
+    'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
 print(json.dumps(d))
