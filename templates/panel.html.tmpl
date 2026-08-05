@@ -353,7 +353,7 @@
             <h2>📋 Subscription Link</h2>
             <div class="sub-inner">
                 <div class="sub-text">
-                    <div class="sub-url" id="sub-url">https://${DOMAIN}/sub</div>
+                    <div class="sub-url" id="sub-url">${PAGES_URL}/sub</div>
                     <button class="btn primary" onclick="copySub()">📋 Copy Subscription</button>
                 </div>
                 <div class="sub-qr" id="sub-qr"></div>
@@ -401,7 +401,7 @@
             <h2>🔗 Merged Subscription</h2>
             <div class="sub-inner">
                 <div class="sub-text">
-                    <div class="sub-url" id="sub-url">https://${DOMAIN}/sub</div>
+                    <div class="sub-url" id="sub-url">${PAGES_URL}/sub</div>
                     <button class="btn primary" onclick="copySub()">📋 Copy Merged Sub</button>
                     <div style="margin-top:10px;font-size:12px;color:var(--text2);">
                         Contains all gayroxy configs + fetched external subscriptions.
@@ -676,7 +676,7 @@
                     'Done — routing rules using GEOIP will resolve correctly. (The <b>ASN</b> field is optional; leave it empty unless you use ASN-based rules.)',
                 ],
                 links: [
-                    ['Country.mmdb', 'https://${DOMAIN}/geo/Country.mmdb'],
+                    ['Country.mmdb', '${PAGES_URL}/geo/Country.mmdb'],
                 ],
             },
             'NekoBox (Android)': {
@@ -690,8 +690,8 @@
                     'Restart the connection for the new databases to take effect.',
                 ],
                 links: [
-                    ['geoip.db', 'https://${DOMAIN}/geo/geoip.db'],
-                    ['geosite.db', 'https://${DOMAIN}/geo/geosite.db'],
+                    ['geoip.db', '${PAGES_URL}/geo/geoip.db'],
+                    ['geosite.db', '${PAGES_URL}/geo/geosite.db'],
                 ],
             },
         };

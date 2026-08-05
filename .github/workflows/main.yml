@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
+      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
 
     timeout-minutes: 240
 
@@ -37,12 +38,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: ⏳ Randomized startup delay
-        run: |
-          DELAY=$(( RANDOM % 90 + 15 ))
-          echo "Waiting ${DELAY}s..."
-          sleep "$DELAY"
 
       - name: Make script executable
         run: chmod +x proxy.sh .github/retrigger.sh
@@ -53,6 +48,7 @@ jobs:
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
           CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
+          PAGES_URL: ${{ env.PAGES_URL }}
         run: |
           mkdir -p logs
           echo "::group::Proxy Output"
@@ -70,6 +66,35 @@ jobs:
             sub/subscription.b64
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: 📦 Deploy static assets to GitHub Pages
+        if: always()
+        run: |
+          # Prepare Pages content from generated files
+          mkdir -p _site
+          cp -r sub/* _site/ 2>/dev/null || true
+          cp -r geo _site/ 2>/dev/null || true
+          # Ensure subscription.b64 is accessible as /sub (base64 download)
+          cp _site/subscription.b64 _site/sub 2>/dev/null || true
+
+          # Configure git for Pages branch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Create or switch to gh-pages branch (orphan, no history)
+          git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
+          git rm -rf . 2>/dev/null || true
+          cp -r _site/* .
+          touch .nojekyll
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "🌐 Update panel & sub [run:${{ github.run_id }}]"
+            git push -f origin gh-pages
+            echo "✅ Pages deployed to https://<user>.github.io/gayroxy/"
+          else
+            echo "No changes to deploy"
+          fi
 
       - name: 🔄 Re-trigger (keep alive)
         if: always()

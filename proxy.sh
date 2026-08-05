@@ -33,6 +33,11 @@ WARP_PORT=${WARP_PORT:-40000}
 : "${CF_AUTHTOKEN:?Set CF_AUTHTOKEN}"
 : "${CF_DOMAIN:?Set CF_DOMAIN (e.g. proxy.example.com)}"
 
+# GitHub Pages URL for always-on static assets
+# e.g. https://username.github.io/gayroxy
+# Omit to use the tunnel domain as fallback
+PAGES_URL="${PAGES_URL:-https://${CF_DOMAIN}}"
+
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
 SEED="${SEED:-$CF_AUTHTOKEN}"
 
@@ -521,9 +526,11 @@ merge_external_subs() {
 
 merge_external_subs
 
-# ─── Render HTML templates (after tunnel — we have the domain & URLs) ────────
+# Render HTML templates (after tunnel — we have the domain & URLs)
 log "Rendering HTML pages..."
-envsubst '$DOMAIN' < templates/index.html.tmpl > "${SUB_DIR}/index.html"
+envsubst '$DOMAIN $PAGES_URL' < templates/index.html.tmpl > "${SUB_DIR}/index.html"
+
+export PAGES_URL DOMAIN
 
 export SUB_B64 VLESS_URL TROJAN_URL VMESS_URL VLESS_GRPC_URL TROJAN_GRPC_URL
 export SS_URL SS_WS_URL SS_GRPC_URL VMESS_GRPC_URL
@@ -557,14 +564,14 @@ keys = [
     'GRPC_SERVICE_VLESS','GRPC_SERVICE_TROJAN',
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
-    'REALITY_PUBLIC','SUB_B64','DOMAIN',
+    'REALITY_PUBLIC','SUB_B64','DOMAIN','PAGES_URL',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
 print(json.dumps(d))
 ")
 
-envsubst '${DATA} ${DOMAIN}' < templates/panel.html.tmpl > "${SUB_DIR}/panel.html"
+envsubst '${DATA} ${DOMAIN} ${PAGES_URL}' < templates/panel.html.tmpl > "${SUB_DIR}/panel.html"
 
 # ─── Final output ─────────────────────────────────────────────────────────
 echo ""
@@ -573,6 +580,7 @@ echo "  🚀 Multi-Protocol Proxy Ready!"
 echo "=========================================="
 echo ""
 echo -e "  ${MAG}📋 Subscription:${NC} https://${DOMAIN}/sub"
+echo -e "  ${MAG}🌐 Pages URL:${NC}    ${PAGES_URL}"
 echo -e "  ${MAG}🖥️  Panel:${NC}       https://${DOMAIN}/panel"
 echo ""
 echo "── 🌐 Cloudflare Tunnel (TLS) ──────────────────"
