@@ -93,7 +93,11 @@ jobs:
           # Create or switch to gh-pages branch (orphan, no history)
           git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
           git rm -rf . 2>/dev/null || true
-          cp -r _site/* .
+          # Remove untracked generated dirs (sub/, geo/, logs/) — git rm only
+          # removes tracked files, and cp would fail trying to overwrite
+          # directory ./sub with the _site/sub file.
+          rm -rf sub geo logs _site/.git 2>/dev/null || true
+          cp -r _site/. .
           touch .nojekyll
 
           git add -A
