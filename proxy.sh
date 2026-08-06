@@ -463,11 +463,19 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
 # Two tunnels on the same hostname would flap — never start while one lives.
 # If the old tunnel survives the wait, DEFER: exit cleanly and let the current
 # run's own end-of-cycle retrigger spawn the next one.
+# Liveness probe: tunnel is ALIVE only on a real 2xx/3xx from the tunnel's own
+# nginx. Cloudflare error pages (530 no-tunnel, 521/522 origin down) must count
+# as DOWN — plain `curl -s` exits 0 on ANY HTTP response, which fooled the lock
+# into thinking a dead tunnel was alive (chain died silently). We probe /sub
+# which nginx always serves while the proxy runs.
+tunnel_alive() {
+    curl -sf -o /dev/null --max-time 8 "https://${CF_DOMAIN}/sub" 2>/dev/null
+}
 if [[ "$AUTO_RETRIGGER" == "1" ]]; then
     lock_attempts=0
     lock_max=$(( (RETRIGGER_LEAD_MIN + 3) * 60 / 10 ))   # ~11 min at 10s ticks
     while (( lock_attempts < lock_max )); do
-        if ! curl -s -o /dev/null --max-time 5 -k "https://${CF_DOMAIN}/" 2>/dev/null; then
+        if ! tunnel_alive; then
             log "Old tunnel down — taking over (after $((lock_attempts * 10))s)."
             break
         fi
