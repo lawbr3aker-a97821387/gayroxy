@@ -101,6 +101,11 @@ The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
 | `SEED` | `CF_AUTHTOKEN` | Deterministic UUID/password seed |
 | `WARP_PORT` | `40000` | WARP SOCKS5 port |
 | `RENDER_ONLY` | `0` | `1` = generate assets only (no xray/tunnel), used by CI render job |
+| `PAGES_URL` | `https://<user>.github.io/<repo>/` | **Repo variable** (`vars.PAGES_URL`) — custom Pages domain, e.g. `https://gayroxy-pgs.your-domain.com` |
+| `REALITY_SNI` | `www.cloudflare.com` | Reality TLS fronting target (stealth) |
+| `AUTO_RETRIGGER` | `0` | `1` = fire next run before 240-min cap + wait for old tunnel (zero-downtime handover); set by CI proxy job |
+| `RUN_TIMEOUT_MIN` / `RETRIGGER_LEAD_MIN` | `240` / `8` | Auto-retrigger timing |
+| `WATCHDOG_INTERVAL` / `WATCHDOG_FAILS` | `60` / `5` | Tunnel health watchdog (exit+restart after N failed checks) |
 
 ### Customizing Protocols
 
@@ -139,10 +144,12 @@ The panel's **🔗 External Subs** tab shows all sources and merge status.
 │  2. Checkout + install xray + cloudflared + WARP                │
 │  3. Generate deterministic UUIDs/passwords from SEED            │
 │  4. Start xray (13 protocols) + nginx                           │
-│  5. Create Cloudflare Tunnel → your domain                      │
-│  6. Render /sub + /panel + /geo (same assets as Job 1)          │
-│  7. Upload artifacts (3-day retention)                          │
-│  8. Random delay (15–60s) → Re-trigger with random commit       │
+│  5. Handover lock: wait for old tunnel to drop (~30s) → tunnel │
+│  6. Create Cloudflare Tunnel → your domain                      │
+│  7. Render /sub + /panel + /geo (same assets as Job 1)          │
+│  8. Watchdog: health-check tunnel; auto-re-trigger next run    │
+│     ~8 min before the 240-min cap (zero-downtime handover)     │
+│  9. Upload artifacts (3-day retention)                          │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
