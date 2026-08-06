@@ -21,11 +21,17 @@ on:
 #    on every push/retrigger, no longer waiting for the 240-min proxy job.
 #  • proxy  — runs the real long-lived tunnel (up to 240 min), keeps the
 #    proxy reachable 24/7, re-triggers itself at the end.
+#
+#  ZERO-DOWNTIME HANDOVER (no concurrency group — intentional):
+#  • A concurrency group with cancel-in-progress:true would kill the old
+#    tunnel the instant the new run starts; with :false the new run would
+#    queue and only boot AFTER the old dies (several minutes of downtime).
+#  • Instead: proxy.sh fires the next run ~8 min before its 240-min cap
+#    (AUTO_RETRIGGER=1), the successor boots while the old tunnel is still
+#    up, then waits on a tunnel handover lock until the old endpoint drops
+#    (~10s poll) and registers its own tunnel. Downtime: ~30 seconds.
+#  • Safety: two tunnels can never run simultaneously (lock defers/exits).
 # ═══════════════════════════════════════════════════════════════════════════
-
-concurrency:
-  group: proxy-deploy
-  cancel-in-progress: true
 
 permissions:
   actions: write
@@ -36,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
-      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+      PAGES_URL: ${{ vars.PAGES_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
 
     timeout-minutes: 15
 
@@ -115,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
-      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+      PAGES_URL: ${{ vars.PAGES_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
 
     timeout-minutes: 240
 
@@ -134,6 +140,8 @@ jobs:
           CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           PAGES_URL: ${{ env.PAGES_URL }}
+          AUTO_RETRIGGER: "1"
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           mkdir -p logs
           echo "::group::Proxy Output"
@@ -152,9 +160,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: 🔄 Re-trigger (keep alive)
+      - name: 🔄 Re-trigger (keep alive — legacy retrigger.sh, now backup)
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
         run: |
           .github/retrigger.sh

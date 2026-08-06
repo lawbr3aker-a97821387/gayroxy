@@ -48,6 +48,24 @@ SEED="${SEED:-$CF_AUTHTOKEN}"
 # Used by CI to deploy Pages quickly; the long-lived tunnel runs in a later step.
 RENDER_ONLY="${RENDER_ONLY:-0}"
 
+# Reality TLS fronting target (stealth). Change if www.cloudflare.com is flagged;
+# any major TLS site works. Must match in config.json, client URL and panel.
+REALITY_SNI="${REALITY_SNI:-www.cloudflare.com}"
+
+# Tunnel watchdog (medium #5): every WATCHDOG_INTERVAL seconds check the tunnel
+# endpoint. After WATCHDOG_FAILS consecutive failures the run exits so the
+# re-trigger cycle restarts the tunnel fast instead of waiting out the 240-min cap.
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
+WATCHDOG_FAILS="${WATCHDOG_FAILS:-5}"
+
+# Auto re-trigger (high #1): when set, proxy.sh spawns a background dispatcher
+# that fires a fresh workflow run shortly before this run's timeout, so the next
+# tunnel comes up ~immediately after this one dies (near-zero downtime).
+# Uses GH_TOKEN (workflow_dispatch) — set to 1 in the proxy job.
+AUTO_RETRIGGER="${AUTO_RETRIGGER:-0}"
+RUN_TIMEOUT_MIN="${RUN_TIMEOUT_MIN:-240}"
+RETRIGGER_LEAD_MIN="${RETRIGGER_LEAD_MIN:-8}"
+
 # Default external subscription (used when EXTERNAL_SUB_URLS secret is unset).
 # Override by setting the EXTERNAL_SUB_URLS secret/env (comma-separated list).
 EXTERNAL_SUB_URLS="${EXTERNAL_SUB_URLS:-https://hazel-daisy-737d.swift-birch-13f6.workers.dev/sub?token=8c2b00f6bd9a6f29a18bdd0afdf07e13}"
@@ -300,8 +318,28 @@ mkdir -p "$SUB_DIR" "$LOG_DIR"
 #   Country.mmdb          → Shadowrocket (Settings → GeoLite2 数据库)
 #   geoip.dat/geosite.dat → xray-family clients (v2rayN / v2rayNG)
 #   geoip.db/geosite.db   → sing-box clients (NekoBox — manual import)
+# Cached by date: if files for today exist in CACHE_DIR/geo/YYYY-MM-DD/, reuse them.
 download_geo() {
-    mkdir -p "$GEO_DIR"
+    local today=$(date +%F)
+    local cache_base="${HOME}/.cache/gayroxy/geo/${today}"
+    local cached=0
+    if [[ -d "${cache_base}" ]]; then
+        mkdir -p "${GEO_DIR}"
+        # Hardlink from cache to workspace (fast, no copy on same fs)
+        for f in "${cache_base}"/*; do
+            [[ -f "$f" ]] && ln -f "$f" "${GEO_DIR}/" 2>/dev/null || cp -f "$f" "${GEO_DIR}/"
+        done
+        local count=$(ls -1 "${GEO_DIR}" 2>/dev/null | wc -l)
+        if (( count > 0 )); then
+            log "geo: cache hit (${today}) — ${count} files reused."
+            cached=1
+        fi
+    fi
+    if (( cached == 1 )); then
+        return 0
+    fi
+
+    mkdir -p "${GEO_DIR}"
     # repo | comma-separated asset names to grab from that repo's latest release.
     # Uses the stable /releases/latest/download/ redirect (no api.github.com call —
     # unauthenticated API calls get rate-limited on shared runner egress IPs).
@@ -341,6 +379,12 @@ download_geo() {
             fi
         done
     done
+
+    # Populate cache for next runs
+    mkdir -p "${cache_base}"
+    for f in "${GEO_DIR}"/*; do
+        [[ -f "$f" ]] && ln -f "$f" "${cache_base}/" 2>/dev/null || cp -f "$f" "${cache_base}/"
+    done
 }
 download_geo
 
@@ -358,7 +402,7 @@ export XRAY_LOG="${LOG_DIR}/xray.log" \
   PATH_VLESS_HU PATH_TROJAN_HU PATH_VMESS_HU \
   GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN \
   GRPC_SERVICE_SS GRPC_SERVICE_VMESS \
-  REALITY_PRIVATE REALITY_PUBLIC SHORT_ID
+  REALITY_PRIVATE REALITY_PUBLIC SHORT_ID REALITY_SNI
 
 envsubst < templates/config.json.tmpl > "$XRAY_CONFIG_FILE"
 
@@ -413,6 +457,29 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
     exit 1
 }
 
+# ─── Tunnel handover lock (high #1) ────────────────────────────────────────
+# If a previous run's tunnel is still alive (this run was dispatched early for
+# a zero-downtime handover), wait for it to drop before registering ours.
+# Two tunnels on the same hostname would flap — never start while one lives.
+# If the old tunnel survives the wait, DEFER: exit cleanly and let the current
+# run's own end-of-cycle retrigger spawn the next one.
+if [[ "$AUTO_RETRIGGER" == "1" ]]; then
+    lock_attempts=0
+    lock_max=$(( (RETRIGGER_LEAD_MIN + 3) * 60 / 10 ))   # ~11 min at 10s ticks
+    while (( lock_attempts < lock_max )); do
+        if ! curl -s -o /dev/null --max-time 5 -k "https://${CF_DOMAIN}/" 2>/dev/null; then
+            log "Old tunnel down — taking over (after $((lock_attempts * 10))s)."
+            break
+        fi
+        lock_attempts=$((lock_attempts + 1))
+        sleep 10
+    done
+    if (( lock_attempts >= lock_max )); then
+        log "Old tunnel still up after $((lock_max * 10))s — deferring to current run's cycle."
+        exit 0
+    fi
+fi
+
 # ─── Start Cloudflare Tunnel ────────────────────────────────────────────────
 CLOUDFLARED_LOG="${LOG_DIR}/cloudflared.log"
 log "Starting Cloudflare tunnel..."
@@ -464,7 +531,7 @@ TROJAN_GRPC_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=grpc&security=tls&fp
 SS_BASE="$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)"
 SS_URL="ss://${SS_BASE}@127.0.0.1:${PORT_SHADOWSOCKS}#Gayroxy-🇺🇳-SS-Local"
 
-REALITY_LOCAL_URL="vless://${UUID_REALITY}@127.0.0.1:${PORT_REALITY}?security=reality&flow=xtls-rprx-vision&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp&sni=www.cloudflare.com#Gayroxy-🇺🇳-Reality-Local"
+REALITY_LOCAL_URL="vless://${UUID_REALITY}@127.0.0.1:${PORT_REALITY}?security=reality&flow=xtls-rprx-vision&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp&sni=${REALITY_SNI}#Gayroxy-🇺🇳-Reality-Local"
 
 # New external protocols (WS/gRPC through Cloudflare tunnel)
 SS_WS_URL="ss://$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)@${DOMAIN}:443?type=ws&security=tls&path=${PATH_SS_WS}&host=${DOMAIN}#Gayroxy-🇺🇳-SS-WS"
@@ -664,7 +731,7 @@ keys = [
     'GRPC_SERVICE_VLESS','GRPC_SERVICE_TROJAN',
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
-    'REALITY_PUBLIC','SUB_B64','DOMAIN','PAGES_URL',
+    'REALITY_PUBLIC','SUB_B64','DOMAIN','PAGES_URL','REALITY_SNI',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
@@ -714,5 +781,53 @@ if [[ "$RENDER_ONLY" == "1" ]]; then
     exit 0
 fi
 
+# ─── Auto re-trigger (high #1) ─────────────────────────────────────────────
+# Fire the next workflow run ~RETRIGGER_LEAD_MIN before this run's timeout so
+# the next runner is already booting/render-deploying while we're still up.
+if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
+    sleep_sec=$(( (RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN) * 60 ))
+    (
+        sleep "$sleep_sec"
+        log "Auto-re-trigger: dispatching next run (${RUN_TIMEOUT_MIN}-${RETRIGGER_LEAD_MIN}min elapsed)..."
+        gh workflow run "Build & Deploy Proxy" --ref "${GITHUB_REF_NAME:-master}" 2>&1 || true
+    ) &
+    RETRIGGER_PID=$!
+    log "Auto-re-trigger armed: dispatch in ${sleep_sec}s (pid ${RETRIGGER_PID})"
+else
+    RETRIGGER_PID=""
+fi
+
+# ─── Tunnel watchdog (medium #5) ───────────────────────────────────────────
+# If the public endpoint stops responding, signal the main process to exit
+# so the re-trigger cycle restarts the tunnel instead of a silent 4-hour outage.
+watchdog() {
+    local fails=0 endpoint="https://${CF_DOMAIN}/" main_pid=$$
+    while :; do
+        sleep "$WATCHDOG_INTERVAL"
+        if ! kill -0 "$XRAY_PID" 2>/dev/null; then
+            log "watchdog: xray died — signalling main to exit."
+            kill -TERM "$main_pid" 2>/dev/null || true
+            exit 1
+        fi
+        if curl -s -o /dev/null --max-time 8 -k "$endpoint" 2>/dev/null; then
+            fails=0
+        else
+            fails=$((fails + 1))
+            warn "watchdog: endpoint unreachable (${fails}/${WATCHDOG_FAILS})"
+            if (( fails >= WATCHDOG_FAILS )); then
+                error "watchdog: tunnel down for ${WATCHDOG_FAILS} checks — signalling main to exit."
+                kill -TERM "$main_pid" 2>/dev/null || true
+                exit 1
+            fi
+        fi
+    done
+}
+watchdog &
+WATCHDOG_PID=$!
+
 log "Running... (Ctrl-C to stop)"
 wait "$XRAY_PID"
+# Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
+wait "$WATCHDOG_PID" 2>/dev/null || true
+[[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+exit 0

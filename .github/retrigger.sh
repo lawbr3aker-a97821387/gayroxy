@@ -3,6 +3,14 @@
 # Called by GitHub Actions to trigger the next run with a random commit.
 set -euo pipefail
 
+# If a tunnel is already live (handover in progress / another run took over),
+# do NOT dispatch another run — that would snowball redundant runs. The live
+# run's own AUTO_RETRIGGER will spawn the successor before it times out.
+if curl -s -o /dev/null --max-time 5 -k "https://${CF_DOMAIN:-}/" 2>/dev/null; then
+    echo "Tunnel already live — skipping re-trigger (handover in progress)."
+    exit 0
+fi
+
 DELAY=$(( RANDOM % 45 + 15 ))
 echo "Waiting ${DELAY}s before re-triggering..."
 sleep "$DELAY"

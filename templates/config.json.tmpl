@@ -151,8 +151,8 @@
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "www.cloudflare.com:443",
-          "serverNames": ["www.cloudflare.com"],
+          "dest": "${REALITY_SNI}:443",
+          "serverNames": ["${REALITY_SNI}"],
           "privateKey": "${REALITY_PRIVATE}",
           "publicKey": "${REALITY_PUBLIC}",
           "shortIds": ["${SHORT_ID}"]
