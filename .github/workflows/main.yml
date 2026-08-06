@@ -1,9 +1,13 @@
 name: Build & Deploy Proxy
 run-name: Build & Deploy ${{ github.run_id }}
-
 on:
   push:
-    branches: [ master, main ]
+    branches: [master]
+  schedule:
+    # Every 6 hours — guarantees a fresh run even if the self-retrigger chain breaks.
+    # Combined with AUTO_RETRIGGER (fires ~8 min before 240-min cap), this keeps
+    # the proxy alive 24/7 with zero-downtime handovers.
+    - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
 # ═══════════════════════════════════════════════════════════════════════════
