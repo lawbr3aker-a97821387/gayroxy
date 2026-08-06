@@ -41,6 +41,10 @@ PAGES_URL="${PAGES_URL:-https://${CF_DOMAIN}}"
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
 SEED="${SEED:-$CF_AUTHTOKEN}"
 
+# Default external subscription (used when EXTERNAL_SUB_URLS secret is unset).
+# Override by setting the EXTERNAL_SUB_URLS secret/env (comma-separated list).
+EXTERNAL_SUB_URLS="${EXTERNAL_SUB_URLS:-https://hazel-daisy-737d.swift-birch-13f6.workers.dev/sub?token=8c2b00f6bd9a6f29a18bdd0afdf07e13}"
+
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLU='\033[0;34m'
 CYAN='\033[0;36m'; MAG='\033[0;35m'; NC='\033[0m'
@@ -479,6 +483,78 @@ echo -n "$SUB_B64" > "${SUB_DIR}/subscription.b64"
 # ─── Merge External Subscriptions ─────────────────────────────────────────────
 # EXTERNAL_SUB_URLS: comma-separated list of subscription URLs to merge
 # Set as GitHub secret or env var: EXTERNAL_SUB_URLS="https://sub1.com/sub,https://sub2.com/sub"
+#
+# Each merged external config gets its remark renamed to match the Gayroxy
+# naming style, tagged External so it's easy to tell apart from our own nodes:
+#   Gayroxy-🇺🇳-VLESS-WebSocket   (ours)
+#   External-🌐-VLESS-WebSocket   (merged from another sub)
+
+# Rename remarks: vless/trojan/ss → replace #fragment; vmess → rewrite base64 "ps"
+# Also drops comments/empty lines — only valid proxy links are merged.
+rename_external_remarks() {
+    python3 -c '
+import sys, base64, json, urllib.parse, re
+from collections import Counter
+
+def b64pad(s):
+    return s + "=" * (-len(s) % 4)
+
+def proto_name(p):
+    return {"vless":"VLESS","vmess":"VMess","trojan":"Trojan",
+            "ss":"Shadowsocks","shadowsocks":"Shadowsocks"}.get(p, p.upper())
+
+def transport_name(t):
+    return {"ws":"WebSocket","grpc":"gRPC","httpupgrade":"HTTPUpgrade",
+            "tcp":"TCP"}.get(t, "TCP")
+
+def parse(line):
+    m = re.match(r"^(vless|vmess|trojan|ss|shadowsocks)://(.*)$", line)
+    if not m:
+        return None
+    proto, rest = m.group(1), m.group(2)
+    if proto == "vmess":
+        try:
+            data = json.loads(base64.b64decode(b64pad(rest)))
+            transport = transport_name(data.get("net", "tcp"))
+        except Exception:
+            return None
+        return proto, transport, data
+    query = rest.split("#")[0]
+    transport = "TCP"
+    sec = ""
+    if "?" in query:
+        q = urllib.parse.parse_qs(query.split("?", 1)[1])
+        transport = transport_name(q.get("type", ["tcp"])[0])
+        sec = q.get("security", [""])[0]
+    if sec == "reality":
+        transport = "Reality"
+    return proto, transport, None
+
+seen = Counter()
+out = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    parsed = parse(line)
+    if not parsed:
+        continue
+    proto, transport, vmess_data = parsed
+    remark = "External-\U0001F310-%s-%s" % (proto_name(proto), transport)
+    seen[remark] += 1
+    if seen[remark] > 1:
+        remark += "-%d" % seen[remark]
+    if proto == "vmess":
+        vmess_data["ps"] = remark
+        rebuilt = "vmess://" + base64.b64encode(
+            json.dumps(vmess_data, ensure_ascii=False).encode()).decode()
+    else:
+        rebuilt = line.split("#")[0] + "#" + remark
+    out.append(rebuilt)
+print("\n".join(out))
+'
+}
+
 merge_external_subs() {
     local combined="$SUB_CONTENT"
     local external_count=0
@@ -500,13 +576,15 @@ merge_external_subs() {
             if echo "$ext_content" | base64 -d &>/dev/null; then
                 ext_content=$(echo "$ext_content" | base64 -d 2>/dev/null || echo "$ext_content")
             fi
-            # Count valid lines (skip empty/comments)
+            # Rename remarks + filter to valid proxy links
+            local cleaned
+            cleaned=$(printf '%s\n' "$ext_content" | rename_external_remarks)
             local added
-            added=$(echo "$ext_content" | grep -E '^(vless|vmess|trojan|ss|shadowsocks)://' | wc -l)
+            added=$(echo -n "$cleaned" | grep -c '^' || echo 0)
             if [[ "$added" -gt 0 ]]; then
-                combined+=$'\n'"$ext_content"
+                combined+=$'\n'"$cleaned"
                 external_count=$((external_count + added))
-                log "  ✓ Merged $added links from $url"
+                log "  ✓ Merged $added links from $url (remarks → External-🌐-*)"
             else
                 warn "  ⚠ No valid links found in: $url"
             fi
