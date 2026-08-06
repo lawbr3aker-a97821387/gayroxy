@@ -35,11 +35,18 @@ WARP_PORT=${WARP_PORT:-40000}
 
 # GitHub Pages URL for always-on static assets
 # e.g. https://username.github.io/gayroxy
-# Omit to use the tunnel domain as fallback
+# Omit to use the tunnel domain as fallback.
+# Trailing slash stripped so template joins like ${PAGES_URL}/sub.txt
+# don't produce a double slash.
 PAGES_URL="${PAGES_URL:-https://${CF_DOMAIN}}"
+PAGES_URL="${PAGES_URL%/}"
 
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
 SEED="${SEED:-$CF_AUTHTOKEN}"
+
+# RENDER_ONLY=1: generate assets (sub/panel/geo) without starting any services.
+# Used by CI to deploy Pages quickly; the long-lived tunnel runs in a later step.
+RENDER_ONLY="${RENDER_ONLY:-0}"
 
 # Default external subscription (used when EXTERNAL_SUB_URLS secret is unset).
 # Override by setting the EXTERNAL_SUB_URLS secret/env (comma-separated list).
@@ -73,7 +80,12 @@ trap cleanup INT TERM EXIT
 # ─── Install dependencies ────────────────────────────────────────────────────
 log "Checking dependencies..."
 MISSING=()
-for pkg in curl unzip python3 nginx; do command -v "$pkg" &>/dev/null || MISSING+=("$pkg"); done
+# RENDER_ONLY doesn't need nginx (no local service is started)
+if [[ "$RENDER_ONLY" == "1" ]]; then
+    for pkg in curl unzip python3; do command -v "$pkg" &>/dev/null || MISSING+=("$pkg"); done
+else
+    for pkg in curl unzip python3 nginx; do command -v "$pkg" &>/dev/null || MISSING+=("$pkg"); done
+fi
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     log "Installing: ${MISSING[*]}"
     if command -v apt-get &>/dev/null; then
@@ -88,7 +100,8 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 fi
 
 # ─── Install xray-core ──────────────────────────────────────────────────────
-if [[ ! -x "$XRAY_BIN" ]]; then
+# (Skipped in RENDER_ONLY mode — assets don't need the binary)
+if [[ "$RENDER_ONLY" != "1" && ! -x "$XRAY_BIN" ]]; then
     log "Downloading xray-core..."
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -107,7 +120,11 @@ if [[ ! -x "$XRAY_BIN" ]]; then
 fi
 
 # ─── Install Cloudflare tools (cloudflared + WARP) ──────────────────────────
-CLOUDFLARED_BIN=""
+# (Skipped in RENDER_ONLY mode — no tunnel is started)
+if [[ "$RENDER_ONLY" == "1" ]]; then
+    CLOUDFLARED_BIN="" WARP_BIN="" WARP_ACTIVE=false
+else
+    CLOUDFLARED_BIN=""
 if command -v cloudflared &>/dev/null; then
     CLOUDFLARED_BIN=$(command -v cloudflared)
     log "Using system cloudflared"
@@ -198,6 +215,7 @@ else
         warn "WARP not active — Reddit blocking may persist"
     fi
 fi
+fi   # end RENDER_ONLY else (cloudflared + WARP)
 
 # ─── Generate credentials ────────────────────────────────────────────────────
 log "Generating credentials..."
@@ -364,6 +382,9 @@ fi
 NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU'
 envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 
+# ─── Start services (skipped in RENDER_ONLY mode) ───────────────────────────
+if [[ "$RENDER_ONLY" != "1" ]]; then
+
 # ─── Start xray first ────────────────────────────────────────────────────────
 log "Starting Xray-core..."
 "$XRAY_BIN" run -c "$XRAY_CONFIG_FILE" > "${LOG_DIR}/xray-output.log" 2>&1 &
@@ -421,6 +442,7 @@ if [[ "$TUNNEL_UP" -ne 1 ]]; then
 fi
 
 log "Cloudflare tunnel established for domain: ${CF_DOMAIN}"
+fi   # end RENDER_ONLY guard (services block)
 
 # ─── Build subscription URLs ──────────────────────────────────────────────────
 DOMAIN="${CF_DOMAIN}"
@@ -685,6 +707,12 @@ echo -e "  ${YEL}Quick link:${NC} ${VLESS_URL}"
 echo ""
 echo "=========================================="
 echo ""
+
+# RENDER_ONLY mode: done after assets are generated (no long-lived process)
+if [[ "$RENDER_ONLY" == "1" ]]; then
+    log "RENDER_ONLY — assets generated. Skipping long-lived proxy (exit 0)."
+    exit 0
+fi
 
 log "Running... (Ctrl-C to stop)"
 wait "$XRAY_PID"

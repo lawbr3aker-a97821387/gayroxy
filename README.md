@@ -76,11 +76,16 @@ The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
 
 | URL | Description |
 |-----|-------------|
-| `https://your-domain.com/sub` | Base64 subscription (merged) |
-| `https://your-domain.com/panel` | Web panel with QR codes |
-| `https://your-domain.com/geo/Country.mmdb` | GeoIP for Shadowrocket |
-| `https://your-domain.com/geo/geoip.db` | GeoIP for NekoBox |
-| `https://your-domain.com/geo/geosite.db` | GeoSite for NekoBox |
+| `https://<user>.github.io/<repo>/sub.txt` | Merged subscription (text/plain — opens in browser) |
+| `https://your-domain.com/sub` | Merged subscription (base64 — for proxy clients) |
+| `https://<user>.github.io/<repo>/panel` | Web panel with QR codes (always-on via Pages) |
+| `https://<user>.github.io/<repo>/geo/Country.mmdb` | GeoIP for Shadowrocket |
+| `https://<user>.github.io/<repo>/geo/geoip.db` | GeoIP for NekoBox |
+| `https://<user>.github.io/<repo>/geo/geosite.db` | GeoSite for NekoBox |
+
+> **Note:** `/sub.txt` and `/sub` contain the same base64 subscription. `/sub.txt`
+> is served as `text/plain` so it *displays* in a browser instead of downloading;
+> proxy clients work with either URL (they ignore content-type).
 
 ---
 
@@ -92,9 +97,10 @@ The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
 |----------|---------|-------------|
 | `CF_DOMAIN` | — | **Required.** Your domain |
 | `CF_AUTHTOKEN` | — | **Required.** CF API token |
-| `EXTERNAL_SUB_URLS` | `""` | Comma-separated URLs to merge |
+| `EXTERNAL_SUB_URLS` | baked-in workers.dev sub | Comma-separated URLs to merge (unset → default used) |
 | `SEED` | `CF_AUTHTOKEN` | Deterministic UUID/password seed |
 | `WARP_PORT` | `40000` | WARP SOCKS5 port |
+| `RENDER_ONLY` | `0` | `1` = generate assets only (no xray/tunnel), used by CI render job |
 
 ### Customizing Protocols
 
@@ -124,15 +130,19 @@ The panel's **🔗 External Subs** tab shows all sources and merge status.
 ┌─────────────────────────────────────────────────────────────────┐
 │                      GITHUB ACTIONS (24/7)                       │
 ├─────────────────────────────────────────────────────────────────┤
+│  JOB 1 — render (fast, ~2 min, every run)                       │
+│   RENDER_ONLY=1: generate sub + panel + geo → deploy Pages      │
+│   → Pages updates immediately on each push (no 240-min wait)    │
+├─────────────────────────────────────────────────────────────────┤
+│  JOB 2 — proxy (long-lived, up to 240 min)                      │
 │  1. Random delay (15–105s)                                      │
 │  2. Checkout + install xray + cloudflared + WARP                │
 │  3. Generate deterministic UUIDs/passwords from SEED            │
 │  4. Start xray (13 protocols) + nginx                           │
 │  5. Create Cloudflare Tunnel → your domain                      │
-│  6. Fetch & merge external subscriptions                        │
-│  7. Render /sub + /panel + /geo                                 │
-│  8. Upload artifacts (3-day retention)                          │
-│  9. Random delay (15–60s) → Re-trigger with random commit       │
+│  6. Render /sub + /panel + /geo (same assets as Job 1)          │
+│  7. Upload artifacts (3-day retention)                          │
+│  8. Random delay (15–60s) → Re-trigger with random commit       │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -145,6 +155,9 @@ The panel's **🔗 External Subs** tab shows all sources and merge status.
 │  • Serves static /sub, /panel, /geo                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
+**GITHUB PAGES (always-on, even when the runner is offline):**
+- Serves `/panel`, `/sub.txt`, and `/geo/*` 24/7 via `gh-pages` branch
+- Refreshed by Job 1 (`render`) on every run, independently of the tunnel
 
 **Stealth features:**
 - Each run has unique `workflow name` = `Build & Deploy <run_id>`

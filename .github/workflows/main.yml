@@ -1,7 +1,6 @@
 name: Build & Deploy Proxy
 run-name: Build & Deploy ${{ github.run_id }}
 
-
 on:
   push:
     branches: [ master, main ]
@@ -15,6 +14,13 @@ on:
 #  • Random commit on re-trigger (looks like human activity)
 #  • Hard timeout prevents runaway billing
 #  • Short artifact retention (3d) — less evidence left behind
+#
+#  TWO JOBS:
+#  • render — RENDER_ONLY=1: generates sub/panel/geo assets fast (~2 min),
+#    uploads artifacts, deploys to GitHub Pages. Pages updates immediately
+#    on every push/retrigger, no longer waiting for the 240-min proxy job.
+#  • proxy  — runs the real long-lived tunnel (up to 240 min), keeps the
+#    proxy reachable 24/7, re-triggers itself at the end.
 # ═══════════════════════════════════════════════════════════════════════════
 
 concurrency:
@@ -26,7 +32,81 @@ permissions:
   contents: write
 
 jobs:
-  deploy:
+  render:
+    runs-on: ubuntu-latest
+    env:
+      EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
+      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Make script executable
+        run: chmod +x proxy.sh
+
+      - name: ⚡ Render assets (RENDER_ONLY)
+        id: render
+        env:
+          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
+          CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
+          EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
+          PAGES_URL: ${{ env.PAGES_URL }}
+          RENDER_ONLY: "1"
+        run: |
+          mkdir -p logs
+          echo "::group::Render Output"
+          ./proxy.sh 2>&1 | tee logs/render.log
+          echo "::endgroup::"
+
+      - name: 📤 Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-assets
+          path: |
+            logs/
+            sub/*.html
+            sub/subscription.b64
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: 📦 Deploy static assets to GitHub Pages
+        if: always()
+        run: |
+          # Prepare Pages content from generated files
+          mkdir -p _site
+          cp -r sub/* _site/ 2>/dev/null || true
+          cp -r geo _site/ 2>/dev/null || true
+          # Subscription reachable as /sub (base64, for clients) AND
+          # /sub.txt (text/plain so browsers display it instead of downloading)
+          cp _site/subscription.b64 _site/sub 2>/dev/null || true
+          cp _site/subscription.b64 _site/sub.txt 2>/dev/null || true
+
+          # Configure git for Pages branch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Create or switch to gh-pages branch (orphan, no history)
+          git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
+          git rm -rf . 2>/dev/null || true
+          cp -r _site/* .
+          touch .nojekyll
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "🌐 Update panel & sub [run:${{ github.run_id }}]"
+            git push -f origin gh-pages
+            echo "✅ Pages deployed to https://<user>.github.io/gayroxy/"
+          else
+            echo "No changes to deploy"
+          fi
+
+  proxy:
+    needs: []
     runs-on: ubuntu-latest
     env:
       EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
@@ -42,7 +122,7 @@ jobs:
       - name: Make script executable
         run: chmod +x proxy.sh .github/retrigger.sh
 
-      - name: ▶️ Run proxy
+      - name: ▶️ Run proxy (long-lived tunnel)
         id: proxy
         env:
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
@@ -66,35 +146,6 @@ jobs:
             sub/subscription.b64
           if-no-files-found: ignore
           retention-days: 3
-
-      - name: 📦 Deploy static assets to GitHub Pages
-        if: always()
-        run: |
-          # Prepare Pages content from generated files
-          mkdir -p _site
-          cp -r sub/* _site/ 2>/dev/null || true
-          cp -r geo _site/ 2>/dev/null || true
-          # Ensure subscription.b64 is accessible as /sub (base64 download)
-          cp _site/subscription.b64 _site/sub 2>/dev/null || true
-
-          # Configure git for Pages branch
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Create or switch to gh-pages branch (orphan, no history)
-          git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
-          git rm -rf . 2>/dev/null || true
-          cp -r _site/* .
-          touch .nojekyll
-
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "🌐 Update panel & sub [run:${{ github.run_id }}]"
-            git push -f origin gh-pages
-            echo "✅ Pages deployed to https://<user>.github.io/gayroxy/"
-          else
-            echo "No changes to deploy"
-          fi
 
       - name: 🔄 Re-trigger (keep alive)
         if: always()
