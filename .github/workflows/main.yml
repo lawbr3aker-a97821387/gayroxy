@@ -98,6 +98,7 @@ jobs:
           # directory ./sub with the _site/sub file.
           rm -rf sub geo logs _site/.git 2>/dev/null || true
           cp -r _site/. .
+          rm -rf _site   # don't commit the staging dir itself
           touch .nojekyll
 
           git add -A
