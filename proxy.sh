@@ -432,6 +432,7 @@ NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_V
 envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 
 # ─── Start services (skipped in RENDER_ONLY mode) ───────────────────────────
+TUNNEL_DOMAIN=""
 if [[ "$RENDER_ONLY" != "1" ]]; then
 
 # ─── Start xray first ────────────────────────────────────────────────────────
@@ -499,7 +500,6 @@ fi
 CLOUDFLARED_LOG="${LOG_DIR}/cloudflared.log"
 TUNNEL_DOMAIN=""
 if [[ -n "$CF_AUTHTOKEN" && -n "$CF_DOMAIN" ]]; then
-    log "Starting Cloudflare tunnel (named, domain: ${CF_DOMAIN})..."
 
     "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "${CF_AUTHTOKEN}" --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
     CLOUDFLARED_PID=$!
@@ -560,7 +560,7 @@ if [[ -z "$DOMAIN" ]]; then
     # known tunnel URL from the deployed sub (retrigger chains), else a
     # placeholder — the proxy job re-deploys Pages with the real URL ~2 min
     # after its tunnel boots.
-    DOMAIN=$(curl -sL --max-time 8 "${PAGES_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1)
+    DOMAIN=$(curl -sL --max-time 8 "${PAGES_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 || true)
     DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
     log "No live tunnel in this job — sub uses ${DOMAIN} (proxy job will re-deploy with the real URL)"
 fi
