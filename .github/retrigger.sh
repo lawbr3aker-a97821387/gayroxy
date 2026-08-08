@@ -3,17 +3,28 @@
 # Called by GitHub Actions to trigger the next run with a random commit.
 set -euo pipefail
 
-# Tunnel liveness check — same logic as proxy.sh: probe /sub (nginx endpoint),
-# -f (fail on 4xx/5xx) so Cloudflare error pages count as DOWN.
-tunnel_alive() {
-    curl -sf -o /dev/null --max-time 8 "https://${CF_DOMAIN}/sub" 2>/dev/null
+# Tunnel liveness check: probe the CURRENT tunnel URL. For named tunnels that
+# is $CF_DOMAIN; for quick tunnels (zero-config) it's whatever URL the live
+# Pages sub.txt points at (published by the running proxy job). If the current
+# run's tunnel is still alive, skip re-trigger — its AUTO_RETRIGGER will spawn
+# the successor. Probe /sub with -f so Cloudflare error pages count as DOWN.
+tunnel_url() {
+    if [[ -n "${CF_DOMAIN:-}" ]]; then
+        echo "https://${CF_DOMAIN}/sub"
+    else
+        # quick tunnel: read the URL published on Pages by the live run
+        curl -sL --max-time 8 "${PAGES_URL:-}/sub.txt" 2>/dev/null \
+            | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 \
+            | sed 's#^#https://#; s#$#/sub#'
+    fi
 }
 
 # If a tunnel is already live (handover in progress / another run took over),
 # do NOT dispatch another run — that would snowball redundant runs. The live
 # run's own AUTO_RETRIGGER will spawn the successor before it times out.
-if tunnel_alive; then
-    echo "Tunnel already live — skipping re-trigger (handover in progress)."
+TUNNEL_URL=$(tunnel_url)
+if [[ -n "$TUNNEL_URL" ]] && curl -sf -o /dev/null --max-time 8 "$TUNNEL_URL" 2>/dev/null; then
+    echo "Tunnel already live ($TUNNEL_URL) — skipping re-trigger (handover in progress)."
     exit 0
 fi
 
@@ -53,18 +64,19 @@ else:
 PYEOF
 
 # ── Also dispatch workflow directly as backup ──
-gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}" 2>/dev/null || true
+WF_NAME="${GITHUB_WORKFLOW:-Build & Deploy Proxy}"
+gh workflow run "$WF_NAME" --ref "${GITHUB_REF_NAME:-master}" 2>/dev/null || true
 echo "::endgroup::"
 
 # ── Verify next run picked up ──
-NEXT=$(gh run list --workflow "${{ github.workflow }}" --branch "${{ github.ref }}" \
+NEXT=$(gh run list --workflow "$WF_NAME" --branch "${GITHUB_REF_NAME:-master}" \
   --json databaseId,status --jq \
-  '.[] | select(.databaseId != ${{ github.run_id }} and .status != "completed") | "\(.databaseId)|\(.status)"' \
+  '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .status != "completed") | "\(.databaseId)|\(.status)"' \
   | head -1)
 
 if [[ -z "$NEXT" ]]; then
   echo "No new run — dispatching again..."
-  gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}" 2>/dev/null || true
+  gh workflow run "$WF_NAME" --ref "${GITHUB_REF_NAME:-master}" 2>/dev/null || true
 else
   ID="${NEXT%%|*}"
   STATUS="${NEXT##*|}"
@@ -73,7 +85,7 @@ else
     echo "Stuck — cancelling and re-dispatching..."
     gh run cancel "$ID" 2>/dev/null || true
     sleep 3
-    gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}" 2>/dev/null || true
+    gh workflow run "$WF_NAME" --ref "${GITHUB_REF_NAME:-master}" 2>/dev/null || true
   fi
 fi
 echo "::endgroup::"

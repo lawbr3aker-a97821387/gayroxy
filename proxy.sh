@@ -29,20 +29,25 @@ PORT_TROJAN_HU=10015
 PORT_VMESS_HU=10016
 WARP_PORT=${WARP_PORT:-40000}
 
-# Cloudflare variables (must be set as env vars)
-: "${CF_AUTHTOKEN:?Set CF_AUTHTOKEN}"
-: "${CF_DOMAIN:?Set CF_DOMAIN (e.g. proxy.example.com)}"
+# Cloudflare variables — OPTIONAL. Two tunnel modes:
+#   NAMED TUNNEL: CF_AUTHTOKEN + CF_DOMAIN set → custom domain
+#                 (requires a Cloudflare account + a domain on it).
+#   QUICK TUNNEL: neither set → free random trycloudflare.com URL,
+#                 zero requirements (no account, no token, no domain).
+CF_AUTHTOKEN="${CF_AUTHTOKEN:-}"
+CF_DOMAIN="${CF_DOMAIN:-}"
 
 # GitHub Pages URL for always-on static assets
 # e.g. https://username.github.io/gayroxy
 # Omit to use the tunnel domain as fallback.
 # Trailing slash stripped so template joins like ${PAGES_URL}/sub.txt
 # don't produce a double slash.
-PAGES_URL="${PAGES_URL:-https://${CF_DOMAIN}}"
+PAGES_URL="${PAGES_URL:-${CF_DOMAIN:+https://${CF_DOMAIN}}}"
 PAGES_URL="${PAGES_URL%/}"
 
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
-SEED="${SEED:-$CF_AUTHTOKEN}"
+# (quick-tunnel mode has no CF token, so fall back to repo identity).
+SEED="${SEED:-${CF_AUTHTOKEN:-${GITHUB_REPOSITORY:-gayroxy}}}"
 
 # RENDER_ONLY=1: generate assets (sub/panel/geo) without starting any services.
 # Used by CI to deploy Pages quickly; the long-lived tunnel runs in a later step.
@@ -463,6 +468,8 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
 # Two tunnels on the same hostname would flap — never start while one lives.
 # If the old tunnel survives the wait, DEFER: exit cleanly and let the current
 # run's own end-of-cycle retrigger spawn the next one.
+# NOTE: named-tunnel mode only. Quick tunnels get a fresh random URL every
+# run — there is nothing to hand over; the old URL simply dies with its run.
 # Liveness probe: tunnel is ALIVE only on a real 2xx/3xx from the tunnel's own
 # nginx. Cloudflare error pages (530 no-tunnel, 521/522 origin down) must count
 # as DOWN — plain `curl -s` exits 0 on ANY HTTP response, which fooled the lock
@@ -471,7 +478,7 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
 tunnel_alive() {
     curl -sf -o /dev/null --max-time 8 "https://${CF_DOMAIN}/sub" 2>/dev/null
 }
-if [[ "$AUTO_RETRIGGER" == "1" ]]; then
+if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_DOMAIN" ]]; then
     lock_attempts=0
     lock_max=$(( (RETRIGGER_LEAD_MIN + 3) * 60 / 10 ))   # ~11 min at 10s ticks
     while (( lock_attempts < lock_max )); do
@@ -490,37 +497,73 @@ fi
 
 # ─── Start Cloudflare Tunnel ────────────────────────────────────────────────
 CLOUDFLARED_LOG="${LOG_DIR}/cloudflared.log"
-log "Starting Cloudflare tunnel..."
+TUNNEL_DOMAIN=""
+if [[ -n "$CF_AUTHTOKEN" && -n "$CF_DOMAIN" ]]; then
+    log "Starting Cloudflare tunnel (named, domain: ${CF_DOMAIN})..."
 
-"$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "${CF_AUTHTOKEN}" --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
-CLOUDFLARED_PID=$!
+    "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "${CF_AUTHTOKEN}" --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
+    CLOUDFLARED_PID=$!
 
-MAX_RETRIES=30
-TUNNEL_UP=0
-for ((i=1; i<=MAX_RETRIES; i++)); do
-    sleep 2
-    if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-        error "cloudflared died. Log:"
-        tail -n 20 "${CLOUDFLARED_LOG}" 2>/dev/null || true
+    MAX_RETRIES=30
+    TUNNEL_UP=0
+    for ((i=1; i<=MAX_RETRIES; i++)); do
+        sleep 2
+        if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            error "cloudflared died. Log:"
+            tail -n 20 "${CLOUDFLARED_LOG}" 2>/dev/null || true
+            exit 1
+        fi
+        if grep -q "Registered tunnel connection" "${CLOUDFLARED_LOG}" 2>/dev/null; then
+            TUNNEL_UP=1
+            break
+        fi
+    done
+
+    if [[ "$TUNNEL_UP" -ne 1 ]]; then
+        error "Cloudflare tunnel failed to establish within timeout."
+        tail -n 30 "${CLOUDFLARED_LOG}" || true
         exit 1
     fi
-    if grep -q "Registered tunnel connection" "${CLOUDFLARED_LOG}" 2>/dev/null; then
-        TUNNEL_UP=1
-        break
+    TUNNEL_DOMAIN="$CF_DOMAIN"
+    log "Cloudflare tunnel established for domain: ${CF_DOMAIN}"
+else
+    # QUICK TUNNEL — zero-config mode: no account, no token, no domain.
+    # cloudflared gets a fresh random https://<random>.trycloudflare.com URL.
+    log "Starting Cloudflare quick tunnel (zero-config — no account/domain needed)..."
+    "$CLOUDFLARED_BIN" tunnel --no-autoupdate --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
+    CLOUDFLARED_PID=$!
+
+    for ((i=1; i<=60; i++)); do   # up to 120s
+        sleep 2
+        if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            error "cloudflared (quick tunnel) died. Log:"
+            tail -n 20 "${CLOUDFLARED_LOG}" 2>/dev/null || true
+            exit 1
+        fi
+        TUNNEL_DOMAIN=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' "${CLOUDFLARED_LOG}" 2>/dev/null | head -1)
+        [[ -n "$TUNNEL_DOMAIN" ]] && break
+    done
+
+    if [[ -z "$TUNNEL_DOMAIN" ]]; then
+        error "Quick tunnel URL not obtained within timeout."
+        tail -n 30 "${CLOUDFLARED_LOG}" || true
+        exit 1
     fi
-done
-
-if [[ "$TUNNEL_UP" -ne 1 ]]; then
-    error "Cloudflare tunnel failed to establish within timeout."
-    cat "${CLOUDFLARED_LOG}" | tail -n 30
-    exit 1
+    log "Quick tunnel established: https://${TUNNEL_DOMAIN}"
 fi
-
-log "Cloudflare tunnel established for domain: ${CF_DOMAIN}"
 fi   # end RENDER_ONLY guard (services block)
 
 # ─── Build subscription URLs ──────────────────────────────────────────────────
-DOMAIN="${CF_DOMAIN}"
+DOMAIN="${TUNNEL_DOMAIN}"
+if [[ -z "$DOMAIN" ]]; then
+    # Quick-tunnel mode without a live tunnel (RENDER_ONLY job): reuse the last
+    # known tunnel URL from the deployed sub (retrigger chains), else a
+    # placeholder — the proxy job re-deploys Pages with the real URL ~2 min
+    # after its tunnel boots.
+    DOMAIN=$(curl -sL --max-time 8 "${PAGES_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1)
+    DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
+    log "No live tunnel in this job — sub uses ${DOMAIN} (proxy job will re-deploy with the real URL)"
+fi
 
 ENC_PATH_VLESS=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_VLESS}")
 ENC_PATH_TROJAN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_TROJAN}")
@@ -792,12 +835,25 @@ fi
 # ─── Auto re-trigger (high #1) ─────────────────────────────────────────────
 # Fire the next workflow run ~RETRIGGER_LEAD_MIN before this run's timeout so
 # the next runner is already booting/render-deploying while we're still up.
+# Guard: skip if a successor run is already queued/in_progress (avoid snowball
+# when retrigger.sh or another auto-dispatch already fired one).
 if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
     sleep_sec=$(( (RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN) * 60 ))
     (
         sleep "$sleep_sec"
-        log "Auto-re-trigger: dispatching next run (${RUN_TIMEOUT_MIN}-${RETRIGGER_LEAD_MIN}min elapsed)..."
-        gh workflow run "Build & Deploy Proxy" --ref "${GITHUB_REF_NAME:-master}" 2>&1 || true
+        # Skip if a successor run already exists (retrigger.sh or manual dispatch)
+        WF_NAME="${GITHUB_WORKFLOW:-Build & Deploy Proxy}"
+        REF="${GITHUB_REF_NAME:-master}"
+        existing=$(gh run list --workflow "$WF_NAME" --branch "$REF" \
+            --json databaseId,status --jq \
+            '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .status != "completed") | .databaseId' \
+            2>/dev/null | head -1)
+        if [[ -n "$existing" ]]; then
+            log "Auto-re-trigger: successor #$existing already running — skipping dispatch."
+        else
+            log "Auto-re-trigger: dispatching next run (${RUN_TIMEOUT_MIN}-${RETRIGGER_LEAD_MIN}min elapsed)..."
+            gh workflow run "$WF_NAME" --ref "$REF" 2>&1 || true
+        fi
     ) &
     RETRIGGER_PID=$!
     log "Auto-re-trigger armed: dispatch in ${sleep_sec}s (pid ${RETRIGGER_PID})"
@@ -809,7 +865,7 @@ fi
 # If the public endpoint stops responding, signal the main process to exit
 # so the re-trigger cycle restarts the tunnel instead of a silent 4-hour outage.
 watchdog() {
-    local fails=0 endpoint="https://${CF_DOMAIN}/" main_pid=$$
+    local fails=0 endpoint="https://${TUNNEL_DOMAIN}/" main_pid=$$
     while :; do
         sleep "$WATCHDOG_INTERVAL"
         if ! kill -0 "$XRAY_PID" 2>/dev/null; then

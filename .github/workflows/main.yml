@@ -140,17 +140,52 @@ jobs:
       - name: ▶️ Run proxy (long-lived tunnel)
         id: proxy
         env:
+          # Both OPTIONAL now — quick-tunnel mode (zero config) is used when
+          # these are unset. Set them only for a custom domain.
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
           CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           PAGES_URL: ${{ env.PAGES_URL }}
           AUTO_RETRIGGER: "1"
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # GITHUB_TOKEN (built-in) can trigger workflow_dispatch — no PAT needed.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p logs
           echo "::group::Proxy Output"
           ./proxy.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
+
+      - name: 🌐 Re-deploy Pages with live tunnel URL (quick-tunnel mode)
+        # In quick-tunnel mode the tunnel URL changes every run, so the render
+        # job's sub is stale. Re-render with the live URL and push to Pages.
+        # Named-tunnel mode skips this (URL is stable).
+        if: always() && env.CF_DOMAIN == ''
+        run: |
+          # Extract the live tunnel URL from the proxy logs
+          TUNNEL_URL=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' logs/run.log | head -1 || true)
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "No quick-tunnel URL found — skipping Pages re-deploy"
+            exit 0
+          fi
+          echo "Live tunnel URL: $TUNNEL_URL"
+          # Re-render assets with the live URL as PAGES_URL fallback
+          env RENDER_ONLY=1 \
+            PAGES_URL="https://${TUNNEL_URL}" \
+            EXTERNAL_SUB_URLS="${{ env.EXTERNAL_SUB_URLS }}" \
+            SEED="${{ secrets.CF_AUTHTOKEN || github.repository }}" \
+            ./proxy.sh
+          # Deploy to gh-pages
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
+          git rm -rf . 2>/dev/null || true
+          rm -rf sub geo logs _site/.git 2>/dev/null || true
+          cp -r sub panel.html geo . 2>/dev/null || true
+          rm -rf _site
+          touch .nojekyll
+          git add -A
+          git diff --cached --quiet || { git commit -m "🌐 Update with live tunnel URL [run:${{ github.run_id }}]"; git push -f origin gh-pages; }
 
       - name: 📤 Upload artifacts
         if: always()
@@ -167,7 +202,8 @@ jobs:
       - name: 🔄 Re-trigger (keep alive — legacy retrigger.sh, now backup)
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
+          PAGES_URL: ${{ env.PAGES_URL }}
         run: |
           .github/retrigger.sh
