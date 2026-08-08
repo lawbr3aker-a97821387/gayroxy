@@ -38,21 +38,29 @@ cd gayroxy
 
 ### 2. Add GitHub Secrets
 
-Go to **Settings → Secrets and variables → Actions → New repository secret**
+Go to **Settings → Secrets and variables → Actions**
 
-| Secret | Required | Description |
+| Secret / Variable | Required | Description |
 |--------|:--------:|-------------|
-| `CF_DOMAIN` | ✅ | Your Cloudflare domain (e.g. `proxy.example.com`) |
-| `CF_AUTHTOKEN` | ✅ | Cloudflare API Token (Zone:Read, DNS:Edit) |
-| `GH_TOKEN` | ✅ | GitHub Personal Access Token (repo + workflow scope) |
-| `EXTERNAL_SUB_URLS` | ❌ | Comma-separated external subs to merge |
+| `CF_DOMAIN` (secret) | ❌ | Your Cloudflare domain for a **stable** tunnel URL (e.g. `proxy.example.com`). Unset → quick-tunnel mode. |
+| `CF_AUTHTOKEN` (secret) | ❌ | Cloudflare API Token (Zone:Read, DNS:Edit). Unset → quick-tunnel mode. |
+| `EXTERNAL_SUB_URLS` (secret) | ❌ | Comma-separated external subs to merge (unset → baked-in default) |
+| `PAGES_URL` (variable) | ❌ | Custom Pages URL (defaults to `<user>.github.io/<repo>/`) |
+| `CUSTOM_DOMAIN` (variable) | ❌ | Custom Pages domain written to `CNAME` every deploy — **prevents GitHub resetting your domain** |
 
-**How to get tokens:**
+> **Zero-config mode:** no secrets at all. Fork → push → the workflow runs a
+> Cloudflare **Quick Tunnel** (`trycloudflare.com`, no account needed) and
+> deploys static assets to GitHub Pages. Set `CF_DOMAIN` + `CF_AUTHTOKEN`
+> only when you want a stable custom tunnel URL.
+>
+> `GH_TOKEN` is **no longer needed** — the workflow uses the built-in
+> `GITHUB_TOKEN` for re-triggering.
+
+**How to get tokens (named-tunnel mode only):**
 
 - **CF_AUTHTOKEN**: [Cloudflare Dashboard → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) → Create Token → **Edit zone DNS** + **Zone Read**
-- **GH_TOKEN**: [GitHub Settings → Developer settings → Personal access tokens → Fine-grained](https://github.com/settings/tokens) → Repository access: **This repo** → Permissions: **Contents (R/W), Actions (R/W), Workflows (R/W)**
 
-### 3. Configure Cloudflare DNS
+### 3. Configure Cloudflare DNS (named-tunnel mode only)
 
 Add a **CNAME** record pointing to your tunnel (created automatically):
 
@@ -95,13 +103,14 @@ The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CF_DOMAIN` | — | **Required.** Your domain |
-| `CF_AUTHTOKEN` | — | **Required.** CF API token |
+| `CF_DOMAIN` | — | **Optional.** Your own tunnel domain. *Unset → quick-tunnel mode: zero-config `trycloudflare.com` URL, no Cloudflare account needed.* |
+| `CF_AUTHTOKEN` | — | **Optional.** CF API token for named tunnels. Unset → quick-tunnel mode. Also the default `SEED`. |
 | `EXTERNAL_SUB_URLS` | baked-in workers.dev sub | Comma-separated URLs to merge (unset → default used) |
 | `SEED` | `CF_AUTHTOKEN` | Deterministic UUID/password seed |
 | `WARP_PORT` | `40000` | WARP SOCKS5 port |
 | `RENDER_ONLY` | `0` | `1` = generate assets only (no xray/tunnel), used by CI render job |
 | `PAGES_URL` | `https://<user>.github.io/<repo>/` | **Repo variable** (`vars.PAGES_URL`) — custom Pages domain, e.g. `https://gayroxy-pgs.your-domain.com` |
+| `CUSTOM_DOMAIN` | — | **Repo variable** (`vars.CUSTOM_DOMAIN`) — written to the Pages branch `CNAME` on every deploy so GitHub **never resets** your custom domain. Set once; no need to re-add it in the Pages UI after deploys. |
 | `REALITY_SNI` | `www.cloudflare.com` | Reality TLS fronting target (stealth) |
 | `AUTO_RETRIGGER` | `0` | `1` = fire next run before 240-min cap + wait for old tunnel (zero-downtime handover); set by CI proxy job |
 | `RUN_TIMEOUT_MIN` / `RETRIGGER_LEAD_MIN` | `240` / `8` | Auto-retrigger timing |

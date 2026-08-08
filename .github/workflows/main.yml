@@ -87,6 +87,8 @@ jobs:
 
       - name: 📦 Deploy static assets to GitHub Pages
         if: always()
+        env:
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
           # Prepare Pages content from generated files
           mkdir -p _site
@@ -101,6 +103,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # 🛡️ Preserve the custom domain: GitHub Pages stores it in a CNAME
+          # file on the gh-pages branch. A force-push wipes it, which resets
+          # the custom domain in the Pages settings. Prefer the CUSTOM_DOMAIN
+          # repo variable (set once, never reset), else keep the branch's
+          # current CNAME.
+          CNAME_CONTENT="${CUSTOM_DOMAIN:-$(git show gh-pages:CNAME 2>/dev/null || true)}"
+
           # Create or switch to gh-pages branch (orphan, no history)
           git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
           git rm -rf . 2>/dev/null || true
@@ -111,6 +120,11 @@ jobs:
           cp -r _site/. .
           rm -rf _site   # don't commit the staging dir itself
           touch .nojekyll
+          # Restore the custom domain so GitHub doesn't reset it
+          if [ -n "$CNAME_CONTENT" ]; then
+            printf '%s\n' "$CNAME_CONTENT" > CNAME
+            echo "✅ Preserved custom domain: $CNAME_CONTENT"
+          fi
 
           git add -A
           if ! git diff --cached --quiet; then
@@ -162,6 +176,8 @@ jobs:
         # job's sub is stale. Re-render with the live URL and push to Pages.
         # Named-tunnel mode skips this (URL is stable).
         if: always() && env.CF_DOMAIN == ''
+        env:
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
           # Extract the live tunnel URL from the proxy logs
           TUNNEL_URL=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' logs/run.log | head -1 || true)
@@ -180,12 +196,18 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 🛡️ Preserve the custom domain (see render job — force-push wipes CNAME)
+          CNAME_CONTENT=$(git show gh-pages:CNAME 2>/dev/null || true)
           git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
           git rm -rf . 2>/dev/null || true
           rm -rf sub geo logs _site/.git 2>/dev/null || true
           cp -r sub panel.html geo . 2>/dev/null || true
           rm -rf _site
           touch .nojekyll
+          if [ -n "$CNAME_CONTENT" ]; then
+            printf '%s\n' "$CNAME_CONTENT" > CNAME
+            echo "✅ Preserved custom domain: $CNAME_CONTENT"
+          fi
           git add -A
           git diff --cached --quiet || { git commit -m "🌐 Update with live tunnel URL [run:${{ github.run_id }}]"; git push -f origin gh-pages; }
 
