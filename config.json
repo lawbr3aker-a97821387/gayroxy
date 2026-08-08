@@ -1,0 +1,197 @@
+{
+  "log": {"access": "/home/runner/work/gayroxy/gayroxy/logs/xray.log", "error": "/home/runner/work/gayroxy/gayroxy/logs/xray.log"},
+  "inbounds": [
+    {
+      "tag": "vless-ws",
+      "listen": "127.0.0.1",
+      "port": 10001,
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "61d8e3bb-b246-4336-a71f-97fefd08efe4"}], "decryption": "none"},
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {"path": "/1ede9e493bbe3a28"}
+      }
+    },
+    {
+      "tag": "trojan-ws",
+      "listen": "127.0.0.1",
+      "port": 10002,
+      "protocol": "trojan",
+      "settings": {"clients": [{"password": "efUtnANjxb6c9NPS"}]},
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {"path": "/24510ae21f22d661"}
+      }
+    },
+    {
+      "tag": "vmess-ws",
+      "listen": "127.0.0.1",
+      "port": 10003,
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "52ad9ec7-901d-4a44-a628-306dc693ad92", "alterId": 0}]},
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {"path": "/1fbe2694845117ab"}
+      }
+    },
+    {
+      "tag": "vless-grpc",
+      "listen": "127.0.0.1",
+      "port": 10005,
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "45692edb-9ceb-4615-a4d4-bea2bb841b67"}], "decryption": "none"},
+      "streamSettings": {
+        "network": "grpc",
+        "security": "none",
+        "grpcSettings": {"serviceName": "1f3b70d23d99691f"}
+      }
+    },
+    {
+      "tag": "trojan-grpc",
+      "listen": "127.0.0.1",
+      "port": 10006,
+      "protocol": "trojan",
+      "settings": {"clients": [{"password": "efUtnANjxb6c9NPS"}]},
+      "streamSettings": {
+        "network": "grpc",
+        "security": "none",
+        "grpcSettings": {"serviceName": "00fc3006154f9806"}
+      }
+    },
+    {
+      "tag": "shadowsocks",
+      "listen": "127.0.0.1",
+      "port": 10007,
+      "protocol": "shadowsocks",
+      "settings": {"method": "aes-256-gcm", "password": "NmFth2RNgHz44ODR"}
+    },
+    {
+      "tag": "shadowsocks-ws",
+      "listen": "127.0.0.1",
+      "port": 10011,
+      "protocol": "shadowsocks",
+      "settings": {"method": "aes-256-gcm", "password": "NmFth2RNgHz44ODR"},
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {"path": "/67dc1f7a4d9e4d53"}
+      }
+    },
+    {
+      "tag": "shadowsocks-grpc",
+      "listen": "127.0.0.1",
+      "port": 10012,
+      "protocol": "shadowsocks",
+      "settings": {"method": "aes-256-gcm", "password": "NmFth2RNgHz44ODR"},
+      "streamSettings": {
+        "network": "grpc",
+        "security": "none",
+        "grpcSettings": {"serviceName": "d75be1bc520c1c8d"}
+      }
+    },
+    {
+      "tag": "vmess-grpc",
+      "listen": "127.0.0.1",
+      "port": 10013,
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "52ad9ec7-901d-4a44-a628-306dc693ad92", "alterId": 0}]},
+      "streamSettings": {
+        "network": "grpc",
+        "security": "none",
+        "grpcSettings": {"serviceName": "e816653ca29f4224"}
+      }
+    },
+    {
+      "tag": "vless-hu",
+      "listen": "127.0.0.1",
+      "port": 10014,
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "61d8e3bb-b246-4336-a71f-97fefd08efe4"}], "decryption": "none"},
+      "streamSettings": {
+        "network": "httpupgrade",
+        "security": "none",
+        "httpupgradeSettings": {"path": "/a2eae166348f0351"}
+      }
+    },
+    {
+      "tag": "trojan-hu",
+      "listen": "127.0.0.1",
+      "port": 10015,
+      "protocol": "trojan",
+      "settings": {"clients": [{"password": "efUtnANjxb6c9NPS"}]},
+      "streamSettings": {
+        "network": "httpupgrade",
+        "security": "none",
+        "httpupgradeSettings": {"path": "/3f0c65d2b9ef519d"}
+      }
+    },
+    {
+      "tag": "vmess-hu",
+      "listen": "127.0.0.1",
+      "port": 10016,
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "52ad9ec7-901d-4a44-a628-306dc693ad92", "alterId": 0}]},
+      "streamSettings": {
+        "network": "httpupgrade",
+        "security": "none",
+        "httpupgradeSettings": {"path": "/8afe616dc9df15a5"}
+      }
+    },
+    {
+      "tag": "reality",
+      "listen": "127.0.0.1",
+      "port": 10008,
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "2a7c287d-41e9-4774-ab85-addf272a94df"}], "decryption": "none"},
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.cloudflare.com:443",
+          "serverNames": ["www.cloudflare.com"],
+          "privateKey": "IKnWJ7bgipy9tq2Kk6TBtCMGMGS37m3G46sY92BVTXg",
+          "publicKey": "Pok0ldXenTQDgB0ENVTvNWixVTgr_sv4_NdSVFJWXG4",
+          "shortIds": ["fce4ff9a"]
+        }
+      }
+    },
+    {
+      "tag": "socks5",
+      "listen": "127.0.0.1",
+      "port": 10009,
+      "protocol": "socks",
+      "settings": {"auth": "noauth"}
+    },
+    {
+      "tag": "http-proxy",
+      "listen": "127.0.0.1",
+      "port": 10010,
+      "protocol": "http",
+      "settings": {}
+    }
+  ],
+  "outbounds": [
+    {"protocol": "freedom", "settings": {}, "tag": "direct"},
+    {
+      "protocol": "socks",
+      "settings": {
+        "servers": [{"address": "127.0.0.1", "port": 40000}]
+      },
+      "tag": "warp"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "inboundTag": ["socks5", "http-proxy", "shadowsocks", "reality"]
+      }
+    ]
+  }
+}
