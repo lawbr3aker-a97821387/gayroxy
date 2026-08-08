@@ -71,9 +71,11 @@ AUTO_RETRIGGER="${AUTO_RETRIGGER:-0}"
 RUN_TIMEOUT_MIN="${RUN_TIMEOUT_MIN:-240}"
 RETRIGGER_LEAD_MIN="${RETRIGGER_LEAD_MIN:-8}"
 
-# Default external subscription (used when EXTERNAL_SUB_URLS secret is unset).
-# Override by setting the EXTERNAL_SUB_URLS secret/env (comma-separated list).
-EXTERNAL_SUB_URLS="${EXTERNAL_SUB_URLS:-https://hazel-daisy-737d.swift-birch-13f6.workers.dev/sub?token=8c2b00f6bd9a6f29a18bdd0afdf07e13}"
+# External subscriptions (optional). Set the EXTERNAL_SUB_URLS secret/env to a
+# comma-separated list of subscription URLs to merge into the panel/sub. When
+# unset, no external configs are merged (only the 15 built-in Gayroxy configs).
+# Example: EXTERNAL_SUB_URLS="https://my-sub.example.com/sub,https://other.com/sub"
+EXTERNAL_SUB_URLS="${EXTERNAL_SUB_URLS:-}"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLU='\033[0;34m'

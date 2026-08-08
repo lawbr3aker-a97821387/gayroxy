@@ -44,7 +44,7 @@ Go to **Settings → Secrets and variables → Actions**
 |--------|:--------:|-------------|
 | `CF_DOMAIN` (secret) | ❌ | Your Cloudflare domain for a **stable** tunnel URL (e.g. `proxy.example.com`). Unset → quick-tunnel mode. |
 | `CF_AUTHTOKEN` (secret) | ❌ | Cloudflare API Token (Zone:Read, DNS:Edit). Unset → quick-tunnel mode. |
-| `EXTERNAL_SUB_URLS` (secret) | ❌ | Comma-separated external subs to merge (unset → baked-in default) |
+| `EXTERNAL_SUB_URLS` (secret) | ❌ | Comma-separated external subscription URLs to merge (unset → only built-in configs) |
 | `PAGES_URL` (variable) | ❌ | Custom Pages URL (defaults to `<user>.github.io/<repo>/`) |
 | `CUSTOM_DOMAIN` (variable) | ❌ | Custom Pages domain written to `CNAME` every deploy — **prevents GitHub resetting your domain** |
 
@@ -105,7 +105,7 @@ The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
 |----------|---------|-------------|
 | `CF_DOMAIN` | — | **Optional.** Your own tunnel domain. *Unset → quick-tunnel mode: zero-config `trycloudflare.com` URL, no Cloudflare account needed.* |
 | `CF_AUTHTOKEN` | — | **Optional.** CF API token for named tunnels. Unset → quick-tunnel mode. Also the default `SEED`. |
-| `EXTERNAL_SUB_URLS` | baked-in workers.dev sub | Comma-separated URLs to merge (unset → default used) |
+| `EXTERNAL_SUB_URLS` | — (none) | Comma-separated external subscription URLs to merge into the panel. Unset → only the 15 built-in Gayroxy configs are served. |
 | `SEED` | `CF_AUTHTOKEN` | Deterministic UUID/password seed |
 | `WARP_PORT` | `40000` | WARP SOCKS5 port |
 | `RENDER_ONLY` | `0` | `1` = generate assets only (no xray/tunnel), used by CI render job |
