@@ -189,8 +189,12 @@ jobs:
             exit 0
           fi
           echo "Live tunnel URL: $TUNNEL_URL"
-          # Re-render assets with the live URL as PAGES_URL fallback
+          # Re-render assets with the live URL. Pass it as TUNNEL_DOMAIN so
+          # proxy.sh's domain-selection chain picks it directly (PAGES_URL would
+          # try to fetch <PAGES_URL>/sub.txt — circular, and the tunnel is down
+          # by the time this step runs, so it'd fall back to a placeholder).
           env RENDER_ONLY=1 \
+            TUNNEL_DOMAIN="$TUNNEL_URL" \
             PAGES_URL="https://${TUNNEL_URL}" \
             EXTERNAL_SUB_URLS="${{ env.EXTERNAL_SUB_URLS }}" \
             SEED="${{ secrets.CF_AUTHTOKEN || github.repository }}" \

@@ -432,8 +432,13 @@ NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_V
 envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 
 # ─── Start services (skipped in RENDER_ONLY mode) ───────────────────────────
-TUNNEL_DOMAIN=""
-if [[ "$RENDER_ONLY" != "1" ]]; then
+# Respect an externally-supplied TUNNEL_DOMAIN (the quick-tunnel re-deploy step
+# passes the live URL this way). Only clear it when we're about to start our own
+# tunnel (non-RENDER_ONLY); in RENDER_ONLY a pre-set value is the source of truth.
+if [[ "$RENDER_ONLY" == "1" ]]; then
+    : "${TUNNEL_DOMAIN:=}"
+else
+    TUNNEL_DOMAIN=""
 
 # ─── Start xray first ────────────────────────────────────────────────────────
 log "Starting Xray-core..."
@@ -702,7 +707,7 @@ print("\n".join(out))
 merge_external_subs() {
     local combined="$SUB_CONTENT"
     local external_count=0
-    local gayroxy_count=$(echo -n "$SUB_CONTENT" | grep -c '^' || echo 0)
+    local gayroxy_count=$(echo -n "$SUB_CONTENT" | grep -c '^' || true)
 
     if [[ -n "${EXTERNAL_SUB_URLS:-}" ]]; then
         IFS=',' read -ra URLS <<< "$EXTERNAL_SUB_URLS"
@@ -713,19 +718,32 @@ merge_external_subs() {
             local ext_content
             ext_content=$(curl -sL --max-time 15 --retry 2 --retry-delay 3 "$url" 2>/dev/null || true)
             if [[ -z "$ext_content" ]]; then
-                warn "  ✗ Failed to fetch: $url"
+                warn "  ✗ Failed to fetch (empty response): $url"
                 continue
             fi
-            # Try decode if base64 encoded
-            if echo "$ext_content" | base64 -d &>/dev/null; then
-                ext_content=$(echo "$ext_content" | base64 -d 2>/dev/null || echo "$ext_content")
+            # Cloudflare/providers sometimes return an error page (e.g.
+            # "error code: 1101") with HTTP 200 — detect and skip so we don't
+            # emit a misleading "No valid links" warning.
+            if [[ "$ext_content" =~ ^[[:space:]]*error[[:space:]]*code:?[[:space:]]*[0-9]+ ]]; then
+                warn "  ✗ Provider error page returned: $url — $(printf '%s' "$ext_content" | head -1)"
+                continue
+            fi
+            # Try decode ONLY if the whole content looks like base64 (no
+            # scheme:// → it's likely an encoded sub). Plain text with
+            # vless://... lines is left as-is.
+            if ! printf '%s' "$ext_content" | grep -qE '^(vless|trojan|vmess|ss|socks5?)://'; then
+                if printf '%s' "$ext_content" | base64 -d 2>/dev/null | grep -qE '^(vless|trojan|vmess|ss|socks5?)://'; then
+                    ext_content=$(printf '%s' "$ext_content" | base64 -d 2>/dev/null || echo "$ext_content")
+                fi
             fi
             # Rename remarks + filter to valid proxy links
             local cleaned
             cleaned=$(printf '%s\n' "$ext_content" | rename_external_remarks)
             local added
-            added=$(echo -n "$cleaned" | grep -c '^' || echo 0)
-            if [[ "$added" -gt 0 ]]; then
+            # grep -c exits 1 (printing "0") when empty; `|| echo 0` would append a
+            # second 0 → "0\n0", crashing `[[ "$added" -gt 0 ]]`. Use `|| true`.
+            added=$(echo -n "$cleaned" | grep -c '^' || true)
+            if [[ "${added:-0}" -gt 0 ]]; then
                 combined+=$'\n'"$cleaned"
                 external_count=$((external_count + added))
                 log "  ✓ Merged $added links from $url (remarks → External-🌐-*)"
