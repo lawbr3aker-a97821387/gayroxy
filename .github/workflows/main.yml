@@ -108,7 +108,10 @@ jobs:
           # the custom domain in the Pages settings. Prefer the CUSTOM_DOMAIN
           # repo variable (set once, never reset), else keep the branch's
           # current CNAME.
-          CNAME_CONTENT="${CUSTOM_DOMAIN:-$(git show gh-pages:CNAME 2>/dev/null || true)}"
+          # Note: actions/checkout fetches ONLY the current branch, so fetch
+          # gh-pages explicitly before reading its CNAME.
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages 2>/dev/null || true
+          CNAME_CONTENT="${CUSTOM_DOMAIN:-$(git show origin/gh-pages:CNAME 2>/dev/null || true)}"
 
           # Create or switch to gh-pages branch (orphan, no history)
           git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
@@ -197,7 +200,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # 🛡️ Preserve the custom domain (see render job — force-push wipes CNAME)
-          CNAME_CONTENT=$(git show gh-pages:CNAME 2>/dev/null || true)
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages 2>/dev/null || true
+          CNAME_CONTENT="${CUSTOM_DOMAIN:-$(git show origin/gh-pages:CNAME 2>/dev/null || true)}"
           git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
           git rm -rf . 2>/dev/null || true
           rm -rf sub geo logs _site/.git 2>/dev/null || true
