@@ -554,12 +554,16 @@ fi
 fi   # end RENDER_ONLY guard (services block)
 
 # ─── Build subscription URLs ──────────────────────────────────────────────────
-DOMAIN="${TUNNEL_DOMAIN}"
-if [[ -z "$DOMAIN" ]]; then
-    # Quick-tunnel mode without a live tunnel (RENDER_ONLY job): reuse the last
-    # known tunnel URL from the deployed sub (retrigger chains), else a
-    # placeholder — the proxy job re-deploys Pages with the real URL ~2 min
-    # after its tunnel boots.
+# Live tunnel (proxy job) → use its domain. Named-tunnel RENDER_ONLY → the
+# stable custom domain. Quick-tunnel RENDER_ONLY → no tunnel in this job:
+# reuse the last known URL from the deployed sub (retrigger chains), else a
+# placeholder — the proxy job re-deploys Pages with the real URL ~2 min after
+# its tunnel boots.
+if [[ -n "$TUNNEL_DOMAIN" ]]; then
+    DOMAIN="$TUNNEL_DOMAIN"
+elif [[ -n "$CF_DOMAIN" ]]; then
+    DOMAIN="$CF_DOMAIN"
+else
     DOMAIN=$(curl -sL --max-time 8 "${PAGES_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 || true)
     DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
     log "No live tunnel in this job — sub uses ${DOMAIN} (proxy job will re-deploy with the real URL)"
