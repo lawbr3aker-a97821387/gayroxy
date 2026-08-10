@@ -58,7 +58,7 @@ Go to **Settings → Secrets and variables → Actions**.
 | Account | Workers Scripts:Edit |
 | Account | Workers KV Storage:Edit |
 | Account | Account Settings:Read |
-| Zone (optional) | Workers Routes:Edit — only if you want a **custom domain** for the panel/sub (see step 3) |
+| Zone (optional) | Workers Routes:Edit + DNS:Edit — only if you want a **custom domain** for the panel/sub (see step 3) |
 
 ```bash
 gh secret set CF_TOKEN        # paste the token
@@ -69,13 +69,28 @@ gh secret set GH_TOKEN        # optional PAT
 
 By default everything is served at `https://gayroxy.<your-subdomain>.workers.dev`
 (the exact URL is printed on every deploy and saved as the `WORKER_URL` repo
-variable). To use your own domain, add a Cloudflare DNS record pointing at the
-worker and set the repo variable:
+variable). To use your own static domain — e.g. `gayroxy-cf.ai-masters.ir`
+serving `/sub`, `/sub.txt`, `/panel`, `/index.html`, `/geo/*` — set the repo
+variable:
 
 ```bash
-gh variable set WORKER_ROUTE --body "sub.your-domain.com"
-# then add a DNS CNAME:  sub → gayroxy.<subdomain>.workers.dev  (Proxied 🟠)
+gh variable set WORKER_DOMAIN --body "gayroxy-cf.ai-masters.ir"
 ```
+
+`deploy-cf.sh` then binds it as a **Workers Custom Domain** on every deploy:
+Cloudflare creates the DNS record and a managed TLS certificate automatically,
+and the free plan fully supports it. Prerequisites:
+
+- The zone (`ai-masters.ir`) must be active on the **same Cloudflare account**
+  (nameservers pointed at Cloudflare, or a CNAME setup) — otherwise the zone
+  lookup fails and the custom domain is skipped with a warning.
+- The token needs the Zone permissions from step 2 (Workers Routes:Edit +
+  DNS:Edit + Zone:Read).
+
+> Legacy alternative: `gh variable set WORKER_ROUTE --body "sub.your-domain.com"`
+> creates a plain Workers Route instead (you must add the DNS record yourself:
+> `sub → gayroxy.<subdomain>.workers.dev`, Proxied 🟠). Prefer `WORKER_DOMAIN` —
+> it does the DNS + TLS for you.
 
 ### 4. Push & Deploy
 
@@ -121,7 +136,8 @@ live tunnel URL, and re-triggers itself 24/7.
 | `CF_TOKEN` | — | **Required.** CF API token (Workers Scripts:Edit + Workers KV Storage:Edit + Account Settings:Read). Used to deploy the Worker + KV. Also the default `SEED`. |
 | `EXTERNAL_SUB_URLS` | — (none) | Comma-separated external subscription URLs to merge into the panel. Unset → only the 15 built-in Gayroxy configs are served. |
 | `WORKER_URL` | — | **Repo variable** (`vars.WORKER_URL`) — the Cloudflare Worker URL, saved automatically by `deploy-cf.sh` after the first deploy. |
-| `WORKER_ROUTE` | — | **Repo variable** (optional) — custom domain for the Worker (e.g. `sub.example.com`); requires Zone Workers Routes:Edit + a DNS CNAME. |
+| `WORKER_DOMAIN` | — | **Repo variable** (optional, recommended) — static custom domain for the pages, e.g. `gayroxy-cf.ai-masters.ir`; bound as a Workers Custom Domain (auto-DNS + managed TLS). Requires the zone on the same CF account + Zone:Read / Workers Routes:Edit / DNS:Edit. |
+| `WORKER_ROUTE` | — | **Repo variable** (optional, legacy) — plain Workers Route fallback (e.g. `sub.example.com`); you add the DNS record yourself. |
 | `SEED` | `CF_TOKEN` | Deterministic UUID/password seed — same seed = same configs on every deploy and from your laptop (`./update-assets.sh`). |
 | `WARP_PORT` | `40000` | WARP SOCKS5 port |
 | `RENDER_ONLY` | `0` | `1` = generate assets only (no xray/tunnel), used by CI render job |

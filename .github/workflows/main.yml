@@ -46,6 +46,11 @@ env:
   EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
   # Set automatically by deploy-cf.sh after the first deploy (repo variable).
   WORKER_URL: ${{ vars.WORKER_URL }}
+  # Static custom domain for the pages (e.g. gayroxy-cf.ai-masters.ir).
+  # Set once as a repo variable (Settings → Secrets and variables → Actions →
+  # Variables → New variable: WORKER_DOMAIN). deploy-cf.sh binds it to the
+  # Worker as a Workers Custom Domain (auto-DNS + managed TLS, free plan).
+  WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
 
 jobs:
   render:

@@ -7,15 +7,28 @@
 # uploaded, and the Worker script is published.
 #
 # Usage:
-#   CF_TOKEN=xxx ./deploy-cf.sh                         # deploy everything
-#   CF_TOKEN=xxx ./deploy-cf.sh --print-url             # just print the worker URL
-#   CF_TOKEN=xxx WORKER_ROUTE=sub.example.com ./deploy-cf.sh  # + custom domain route
+#   CF_TOKEN=xxx ./deploy-cf.sh                                   # deploy everything
+#   CF_TOKEN=xxx ./deploy-cf.sh --print-url                        # just print the worker URL
+#   CF_TOKEN=xxx WORKER_DOMAIN=gayroxy-cf.ai-masters.ir ./deploy-cf.sh  # + custom domain
+#   CF_TOKEN=xxx WORKER_ROUTE=gayroxy.example.com ./deploy-cf.sh   # + legacy route (fallback)
 #
-# CF_TOKEN permissions (Cloudflare dashboard → My Profile → API Tokens → Create):
+# WORKER_DOMAIN (recommended): creates a Workers Custom Domain — a dedicated
+# hostname with automatic DNS + managed TLS certificate. Requires the zone to
+# be active on Cloudflare, and the token to have:
 #   Account · Workers Scripts:Edit        (upload the Worker)
 #   Account · Workers KV Storage:Edit     (write KV values)
 #   Account · Account Settings:Read       (discover account ID + workers.dev subdomain)
-#   Zone    · Workers Routes:Edit         (ONLY if you use WORKER_ROUTE)
+#   Zone    · Workers Routes:Edit         (bind the custom domain)
+#   Zone    · DNS:Edit                     (auto-create the DNS record)
+#
+# CF_TOKEN permissions (Cloudflare dashboard → My Profile → API Tokens → Create
+# via "Create Custom Token"):
+#   Account · Workers Scripts:Edit        (upload the Worker)
+#   Account · Workers KV Storage:Edit     (write KV values)
+#   Account · Account Settings:Read       (discover account ID + workers.dev subdomain)
+#   Zone    · Workers Routes:Edit         (bind WORKER_DOMAIN or WORKER_ROUTE)
+#   Zone    · DNS:Edit                     (auto-create DNS record for WORKER_DOMAIN)
+#   Zone    · Zone:Read                    (find the zone ID for your domain)
 #
 # After a successful deploy it also stores the live URL as the GitHub repo
 # variable WORKER_URL (best-effort, when gh is authenticated) so downstream
@@ -141,12 +154,65 @@ if [[ -n "$SUBDOMAIN" ]]; then
     log "Worker URL: ${URL}"
 else
     warn "Account has no workers.dev subdomain enabled — enable it in the Cloudflare"
-    warn "dashboard (Workers & Pages → your subdomain) or set WORKER_ROUTE."
+    warn "dashboard (Workers & Pages → your subdomain) or set WORKER_DOMAIN."
 fi
 
-# Optional custom-domain route: WORKER_ROUTE=sub.example.com
-if [[ -n "${WORKER_ROUTE:-}" ]]; then
-    ZONE_NAME="${WORKER_ROUTE#*.}"   # strip the first label
+# ─── 6. Optional custom domain (recommended): gayroxy-cf.ai-masters.ir ──────
+# Creates a Workers Custom Domain — a dedicated hostname with automatic DNS +
+# managed TLS certificate. This is the modern, recommended approach (works on
+# the free plan). Falls back to a legacy Workers Route if the custom-domain
+# API rejects the request (e.g. zone not on CF, or missing DNS:Edit permission).
+#
+# Env: WORKER_DOMAIN=gayroxy-cf.ai-masters.ir  (recommended)
+#      WORKER_ROUTE=gayroxy.example.com        (legacy route fallback)
+#      WORKER_DOMAIN takes precedence over WORKER_ROUTE.
+if [[ -n "${WORKER_DOMAIN:-}" ]]; then
+    ZONE_NAME="${WORKER_DOMAIN#*.}"   # strip the first label → ai-masters.ir
+    ZONES=$(api GET "/zones?name=${ZONE_NAME}&per_page=5")
+    ZONE_ID=$(echo "$ZONES" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r[0]["id"] if r else "")')
+    if [[ -z "$ZONE_ID" ]]; then
+        warn "Zone '${ZONE_NAME}' not found on this token — custom domain skipped."
+        warn "Add the zone to your Cloudflare account (dashboard → Add a Site) and"
+        warn "ensure the token has Zone:Read + Workers Routes:Edit + DNS:Edit."
+    else
+        log "Zone: ${ZONE_NAME} (${ZONE_ID})"
+
+        # ── Custom Domain (recommended path) ──
+        # POST /accounts/{account}/workers/domains
+        # Body: { "environment": "production", "hostname": "...", "service": "gayroxy", "zone_id": "..." }
+        # Idempotent: if the domain already exists, the API returns an error
+        # — we detect that and proceed (it's already bound, no work needed).
+        set +e
+        DOMAIN_RESULT=$(api POST "/accounts/${ACCOUNT_ID}/workers/domains" \
+            --data "{\"environment\":\"production\",\"hostname\":\"${WORKER_DOMAIN}\",\"service\":\"${SCRIPT_NAME}\",\"zone_id\":\"${ZONE_ID}\"}" 2>&1)
+        API_RC=$?
+        set -e
+
+        if [[ $API_RC -eq 0 ]]; then
+            log "Custom domain: https://${WORKER_DOMAIN} → ${SCRIPT_NAME} (auto-DNS + managed TLS)"
+            URL="https://${WORKER_DOMAIN}"
+        elif echo "$DOMAIN_RESULT" | grep -qiE "already exists|duplicate|1003"; then
+            log "Custom domain already bound: https://${WORKER_DOMAIN} — reusing."
+            URL="https://${WORKER_DOMAIN}"
+        else
+            # ── Fall back to legacy Workers Route ──
+            warn "Custom-domain API rejected the request — falling back to legacy route."
+            warn "Reason: $(echo "$DOMAIN_RESULT" | tail -1)"
+            warn "(This usually means the zone is not fully active on Cloudflare, or the"
+            warn " token is missing Zone:DNS Edit. The route method works too, but you'll"
+            warn " need to create the DNS record manually in the dashboard.)"
+            api POST "/zones/${ZONE_ID}/workers/routes" \
+                --data "{\"pattern\":\"${WORKER_DOMAIN}/*\",\"script\":\"${SCRIPT_NAME}\"}" >/dev/null \
+                && log "Route: ${WORKER_DOMAIN}/* → ${SCRIPT_NAME}" \
+                && URL="https://${WORKER_DOMAIN}"
+        fi
+    fi
+
+elif [[ -n "${WORKER_ROUTE:-}" ]]; then
+    # Legacy: WORKER_ROUTE=gayroxy.example.com → creates a route pattern only.
+    # You must create the DNS record yourself (CNAME to the worker or a dummy
+    # A record → the route intercepts it). Use WORKER_DOMAIN instead if possible.
+    ZONE_NAME="${WORKER_ROUTE#*.}"
     ZONES=$(api GET "/zones?name=${ZONE_NAME}&per_page=5")
     ZONE_ID=$(echo "$ZONES" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r[0]["id"] if r else "")')
     if [[ -z "$ZONE_ID" ]]; then
@@ -160,7 +226,7 @@ if [[ -n "${WORKER_ROUTE:-}" ]]; then
     fi
 fi
 
-# ─── 6. Persist WORKER_URL as a repo variable (best-effort, CI or laptop) ────
+# ─── 7. Persist WORKER_URL as a repo variable (best-effort, CI or laptop) ────
 if [[ -n "$URL" ]] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     gh variable set WORKER_URL --body "$URL" >/dev/null 2>&1 \
         && log "Saved WORKER_URL repo variable: ${URL}" \
