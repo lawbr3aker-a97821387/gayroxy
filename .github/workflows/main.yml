@@ -129,6 +129,9 @@ jobs:
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "1"
           LIVE_DEPLOY: "1"
+          # LIVE_DEPLOY pushes the live-tunnel sub to Cloudflare KV at boot,
+          # so the proxy job needs the CF token too (not just the render job).
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
           # PAT preferred (higher rate limits), built-in token as fallback.
           GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           SEED: ${{ secrets.CF_TOKEN || github.repository }}
