@@ -37,13 +37,14 @@ WARP_PORT=${WARP_PORT:-40000}
 CF_AUTHTOKEN="${CF_AUTHTOKEN:-}"
 CF_DOMAIN="${CF_DOMAIN:-}"
 
-# GitHub Pages URL for always-on static assets
-# e.g. https://username.github.io/gayroxy
-# Omit to use the tunnel domain as fallback.
-# Trailing slash stripped so template joins like ${PAGES_URL}/sub.txt
-# don't produce a double slash.
-PAGES_URL="${PAGES_URL:-${CF_DOMAIN:+https://${CF_DOMAIN}}}"
-PAGES_URL="${PAGES_URL%/}"
+# Cloudflare Worker URL for always-on static assets (sub/panel/geo served
+# from Workers KV — the "Pages replacement"). e.g. https://gayroxy.<acct>.workers.dev
+# Set by the workflow (repo variable WORKER_URL, written by deploy-cf.sh after
+# the first deploy). Optional: when unset, the tunnel domain is the fallback and
+# the quick-tunnel re-deploy step publishes the live URL a few minutes later.
+# Trailing slash stripped so joins like ${WORKER_URL}/sub.txt don't double-slash.
+WORKER_URL="${WORKER_URL:-${PAGES_URL:-${CF_DOMAIN:+https://${CF_DOMAIN}}}}"
+WORKER_URL="${WORKER_URL%/}"
 
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
 # (quick-tunnel mode has no CF token, so fall back to repo identity).
@@ -571,7 +572,7 @@ if [[ -n "$TUNNEL_DOMAIN" ]]; then
 elif [[ -n "$CF_DOMAIN" ]]; then
     DOMAIN="$CF_DOMAIN"
 else
-    DOMAIN=$(curl -sL --max-time 8 "${PAGES_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 || true)
+    DOMAIN=$(curl -sL --max-time 8 "${WORKER_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 || true)
     DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
     log "No live tunnel in this job — sub uses ${DOMAIN} (proxy job will re-deploy with the real URL)"
 fi
@@ -770,9 +771,9 @@ merge_external_subs
 
 # Render HTML templates (after tunnel — we have the domain & URLs)
 log "Rendering HTML pages..."
-envsubst '$DOMAIN $PAGES_URL' < templates/index.html.tmpl > "${SUB_DIR}/index.html"
+envsubst '$DOMAIN $WORKER_URL' < templates/index.html.tmpl > "${SUB_DIR}/index.html"
 
-export PAGES_URL DOMAIN
+export WORKER_URL DOMAIN
 
 export SUB_B64 VLESS_URL TROJAN_URL VMESS_URL VLESS_GRPC_URL TROJAN_GRPC_URL
 export SS_URL SS_WS_URL SS_GRPC_URL VMESS_GRPC_URL
@@ -806,14 +807,14 @@ keys = [
     'GRPC_SERVICE_VLESS','GRPC_SERVICE_TROJAN',
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
-    'REALITY_PUBLIC','SUB_B64','DOMAIN','PAGES_URL','REALITY_SNI',
+    'REALITY_PUBLIC','SUB_B64','DOMAIN','WORKER_URL','REALITY_SNI',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
 print(json.dumps(d))
 ")
 
-envsubst '${DATA} ${DOMAIN} ${PAGES_URL}' < templates/panel.html.tmpl > "${SUB_DIR}/panel.html"
+envsubst '${DATA} ${DOMAIN} ${WORKER_URL}' < templates/panel.html.tmpl > "${SUB_DIR}/panel.html"
 
 # ─── Final output ─────────────────────────────────────────────────────────
 echo ""
@@ -822,7 +823,7 @@ echo "  🚀 Multi-Protocol Proxy Ready!"
 echo "=========================================="
 echo ""
 echo -e "  ${MAG}📋 Subscription:${NC} https://${DOMAIN}/sub"
-echo -e "  ${MAG}🌐 Pages URL:${NC}    ${PAGES_URL}"
+echo -e "  ${MAG}🌐 Worker URL:${NC}  ${WORKER_URL}"
 echo -e "  ${MAG}🖥️  Panel:${NC}       https://${DOMAIN}/panel"
 echo ""
 echo "── 🌐 Cloudflare Tunnel (TLS) ──────────────────"

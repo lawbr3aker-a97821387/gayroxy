@@ -355,7 +355,7 @@
             <h2>📋 Subscription Link</h2>
             <div class="sub-inner">
                 <div class="sub-text">
-                    <div class="sub-url" id="sub-url">${PAGES_URL}/sub.txt</div>
+                    <div class="sub-url" id="sub-url"></div>
                     <button class="btn primary" onclick="copySub()">📋 Copy Subscription</button>
                 </div>
                 <div class="sub-qr" id="sub-qr"></div>
@@ -403,7 +403,7 @@
             <h2>🔗 Merged Subscription</h2>
             <div class="sub-inner">
                 <div class="sub-text">
-                    <div class="sub-url" id="sub-url">${PAGES_URL}/sub.txt</div>
+                    <div class="sub-url" id="sub-url-ext"></div>
                     <button class="btn primary" onclick="copySub()">📋 Copy Merged Sub</button>
                     <div style="margin-top:10px;font-size:12px;color:var(--text2);">
                         Contains all gayroxy configs + fetched external subscriptions.
@@ -548,6 +548,14 @@
         renderSection('cards-hu', DATA.hu, 'hu', 'HTTPUpgrade', '⬆️');
         renderSection('cards-local', DATA.local, 'local', 'Direct Connection', '🔌');
 
+        // subscription URL — host-agnostic: derived from wherever this panel is
+        // served (Cloudflare Worker, tunnel, or localhost), so no deploy-time URL
+        // substitution is needed and the copy button always yields an absolute URL.
+        const subOrigin = location.origin + '/sub.txt';
+        document.querySelectorAll('#sub-url, #sub-url-ext').forEach(el => {
+            if (el && !el.textContent.trim()) el.textContent = subOrigin;
+        });
+
         // subscription QR
         const subUrl = document.getElementById('sub-url');
         if (subUrl && typeof QRCode !== 'undefined') {
@@ -678,7 +686,7 @@
                     'Done — routing rules using GEOIP will resolve correctly. (The <b>ASN</b> field is optional; leave it empty unless you use ASN-based rules.)',
                 ],
                 links: [
-                    ['Country.mmdb', '${PAGES_URL}/geo/Country.mmdb'],
+                    ['Country.mmdb', location.origin + '/geo/Country.mmdb'],
                 ],
             },
             'NekoBox (Android)': {
@@ -692,8 +700,8 @@
                     'Restart the connection for the new databases to take effect.',
                 ],
                 links: [
-                    ['geoip.db', '${PAGES_URL}/geo/geoip.db'],
-                    ['geosite.db', '${PAGES_URL}/geo/geosite.db'],
+                    ['geoip.db', location.origin + '/geo/geoip.db'],
+                    ['geosite.db', location.origin + '/geo/geosite.db'],
                 ],
             },
         };

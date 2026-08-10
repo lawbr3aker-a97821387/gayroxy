@@ -36,39 +36,46 @@ git clone https://github.com/YOUR_USERNAME/gayroxy.git
 cd gayroxy
 ```
 
-### 2. Add GitHub Secrets
+### 2. Add Secrets
 
-Go to **Settings → Secrets and variables → Actions**
+Go to **Settings → Secrets and variables → Actions**.
 
-| Secret / Variable | Required | Description |
+| Secret | Required | Description |
 |--------|:--------:|-------------|
-| `CF_DOMAIN` (secret) | ❌ | Your Cloudflare domain for a **stable** tunnel URL (e.g. `proxy.example.com`). Unset → quick-tunnel mode. |
-| `CF_AUTHTOKEN` (secret) | ❌ | Cloudflare API Token (Zone:Read, DNS:Edit). Unset → quick-tunnel mode. |
-| `EXTERNAL_SUB_URLS` (secret) | ❌ | Comma-separated external subscription URLs to merge (unset → only built-in configs) |
-| `PAGES_URL` (variable) | ❌ | Custom Pages URL (defaults to `<user>.github.io/<repo>/`) |
-| `CUSTOM_DOMAIN` (variable) | ❌ | Custom Pages domain written to `CNAME` every deploy — **prevents GitHub resetting your domain** |
+| `CF_TOKEN` | ✅ | Cloudflare API token — **Workers Scripts:Edit**, **Workers KV Storage:Edit**, **Account Settings:Read** (see below) |
+| `GH_TOKEN` | ❌ | GitHub PAT with `repo` + `workflow` scope. Optional — the built-in `GITHUB_TOKEN` works, but a PAT has higher rate limits and survives repo transfer. |
+| `EXTERNAL_SUB_URLS` | ❌ | Comma-separated external subscription URLs to merge (unset → only the 15 built-in configs) |
 
-> **Zero-config mode:** no secrets at all. Fork → push → the workflow runs a
-> Cloudflare **Quick Tunnel** (`trycloudflare.com`, no account needed) and
-> deploys static assets to GitHub Pages. Set `CF_DOMAIN` + `CF_AUTHTOKEN`
-> only when you want a stable custom tunnel URL.
->
-> `GH_TOKEN` is **no longer needed** — the workflow uses the built-in
-> `GITHUB_TOKEN` for re-triggering.
+> **That's it — two tokens max, one required.** No tunnel token, no tunnel
+> domain. The proxy always runs in **quick-tunnel mode** (zero-config
+> `trycloudflare.com` URL), and static assets are served from a **Cloudflare
+> Worker + KV** you own, not GitHub Pages.
 
-**How to get tokens (named-tunnel mode only):**
+**Create `CF_TOKEN`** ([Cloudflare Dashboard → My Profile → API Tokens → Create Token](https://dash.cloudflare.com/profile/api-tokens)) with these permissions:
 
-- **CF_AUTHTOKEN**: [Cloudflare Dashboard → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) → Create Token → **Edit zone DNS** + **Zone Read**
+| Scope | Permission |
+|-------|-----------|
+| Account | Workers Scripts:Edit |
+| Account | Workers KV Storage:Edit |
+| Account | Account Settings:Read |
+| Zone (optional) | Workers Routes:Edit — only if you want a **custom domain** for the panel/sub (see step 3) |
 
-### 3. Configure Cloudflare DNS (named-tunnel mode only)
+```bash
+gh secret set CF_TOKEN        # paste the token
+gh secret set GH_TOKEN        # optional PAT
+```
 
-Add a **CNAME** record pointing to your tunnel (created automatically):
+### 3. (Optional) Custom domain for the panel/sub
 
-| Type | Name | Target | Proxy |
-|------|------|--------|-------|
-| CNAME | `proxy` | (auto-filled by tunnel) | 🟠 Proxied |
+By default everything is served at `https://gayroxy.<your-subdomain>.workers.dev`
+(the exact URL is printed on every deploy and saved as the `WORKER_URL` repo
+variable). To use your own domain, add a Cloudflare DNS record pointing at the
+worker and set the repo variable:
 
-Or use a wildcard: `*.proxy.example.com`
+```bash
+gh variable set WORKER_ROUTE --body "sub.your-domain.com"
+# then add a DNS CNAME:  sub → gayroxy.<subdomain>.workers.dev  (Proxied 🟠)
+```
 
 ### 4. Push & Deploy
 
@@ -78,22 +85,30 @@ git commit -m "Initial deploy"
 git push
 ```
 
-The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
+The workflow runs immediately: the render job publishes the static assets to
+Cloudflare within ~2 minutes, the proxy job boots the tunnel, publishes the
+live tunnel URL, and re-triggers itself 24/7.
 
 ### 5. Access
 
 | URL | Description |
 |-----|-------------|
-| `https://<user>.github.io/<repo>/sub.txt` | Merged subscription (text/plain — opens in browser) |
-| `https://your-domain.com/sub` | Merged subscription (base64 — for proxy clients) |
-| `https://<user>.github.io/<repo>/panel` | Web panel with QR codes (always-on via Pages) |
-| `https://<user>.github.io/<repo>/geo/Country.mmdb` | GeoIP for Shadowrocket |
-| `https://<user>.github.io/<repo>/geo/geoip.db` | GeoIP for NekoBox |
-| `https://<user>.github.io/<repo>/geo/geosite.db` | GeoSite for NekoBox |
+| `https://gayroxy.<sub>.workers.dev/sub.txt` | Merged subscription (text/plain — opens in browser) |
+| `https://gayroxy.<sub>.workers.dev/sub` | Merged subscription (base64 — for proxy clients) |
+| `https://gayroxy.<sub>.workers.dev/panel` | Web panel with QR codes (always-on via Worker+KV) |
+| `https://gayroxy.<sub>.workers.dev/geo/Country.mmdb` | GeoIP for Shadowrocket |
+| `https://gayroxy.<sub>.workers.dev/geo/geoip.db` | GeoIP for NekoBox |
+| `https://gayroxy.<sub>.workers.dev/geo/geosite.db` | GeoSite for NekoBox |
 
 > **Note:** `/sub.txt` and `/sub` contain the same base64 subscription. `/sub.txt`
 > is served as `text/plain` so it *displays* in a browser instead of downloading;
-> proxy clients work with either URL (they ignore content-type).
+> proxy clients work with either URL (they ignore content-type). The panel is
+> **host-agnostic** — it builds its own copyable URLs from wherever it's served.
+
+> **Why `sub.txt` can look like gibberish:** it's a base64 blob of 15+ proxy
+> config lines — that's what subscription clients expect. Paste it into your
+> client (V2RayNG / NekoBox / Shadowrocket) via the **/sub** URL, don't read it
+> as a web page.
 
 ---
 
@@ -103,14 +118,13 @@ The workflow runs immediately, sets up the tunnel, and re-triggers itself 24/7.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CF_DOMAIN` | — | **Optional.** Your own tunnel domain. *Unset → quick-tunnel mode: zero-config `trycloudflare.com` URL, no Cloudflare account needed.* |
-| `CF_AUTHTOKEN` | — | **Optional.** CF API token for named tunnels. Unset → quick-tunnel mode. Also the default `SEED`. |
+| `CF_TOKEN` | — | **Required.** CF API token (Workers Scripts:Edit + Workers KV Storage:Edit + Account Settings:Read). Used to deploy the Worker + KV. Also the default `SEED`. |
 | `EXTERNAL_SUB_URLS` | — (none) | Comma-separated external subscription URLs to merge into the panel. Unset → only the 15 built-in Gayroxy configs are served. |
-| `SEED` | `CF_AUTHTOKEN` | Deterministic UUID/password seed |
+| `WORKER_URL` | — | **Repo variable** (`vars.WORKER_URL`) — the Cloudflare Worker URL, saved automatically by `deploy-cf.sh` after the first deploy. |
+| `WORKER_ROUTE` | — | **Repo variable** (optional) — custom domain for the Worker (e.g. `sub.example.com`); requires Zone Workers Routes:Edit + a DNS CNAME. |
+| `SEED` | `CF_TOKEN` | Deterministic UUID/password seed — same seed = same configs on every deploy and from your laptop (`./update-assets.sh`). |
 | `WARP_PORT` | `40000` | WARP SOCKS5 port |
 | `RENDER_ONLY` | `0` | `1` = generate assets only (no xray/tunnel), used by CI render job |
-| `PAGES_URL` | `https://<user>.github.io/<repo>/` | **Repo variable** (`vars.PAGES_URL`) — custom Pages domain, e.g. `https://gayroxy-pgs.your-domain.com` |
-| `CUSTOM_DOMAIN` | — | **Repo variable** (`vars.CUSTOM_DOMAIN`) — written to the Pages branch `CNAME` on every deploy so GitHub **never resets** your custom domain. Set once; no need to re-add it in the Pages UI after deploys. |
 | `REALITY_SNI` | `www.cloudflare.com` | Reality TLS fronting target (stealth) |
 | `AUTO_RETRIGGER` | `0` | `1` = fire next run before 240-min cap + wait for old tunnel (zero-downtime handover); set by CI proxy job |
 | `RUN_TIMEOUT_MIN` / `RETRIGGER_LEAD_MIN` | `240` / `8` | Auto-retrigger timing |
@@ -145,35 +159,39 @@ The panel's **🔗 External Subs** tab shows all sources and merge status.
 │                      GITHUB ACTIONS (24/7)                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  JOB 1 — render (fast, ~2 min, every run)                       │
-│   RENDER_ONLY=1: generate sub + panel + geo → deploy Pages      │
-│   → Pages updates immediately on each push (no 240-min wait)    │
+│   RENDER_ONLY=1: generate sub + panel + geo                     │
+│   → deploy-cf.sh: push assets to Cloudflare Worker + KV         │
+│   → assets live within ~1 min of every push (no 240-min wait)   │
 ├─────────────────────────────────────────────────────────────────┤
 │  JOB 2 — proxy (long-lived, up to 240 min)                      │
-│  1. Random delay (15–105s)                                      │
-│  2. Checkout + install xray + cloudflared + WARP                │
-│  3. Generate deterministic UUIDs/passwords from SEED            │
-│  4. Start xray (13 protocols) + nginx                           │
-│  5. Handover lock: wait for old tunnel to drop (~30s) → tunnel │
-│  6. Create Cloudflare Tunnel → your domain                      │
-│  7. Render /sub + /panel + /geo (same assets as Job 1)          │
+│  1. Checkout + install xray + cloudflared + WARP                │
+│  2. Generate deterministic UUIDs/passwords from SEED            │
+│  3. Start xray (13 protocols) + nginx                           │
+│  4. Handover lock: wait for old tunnel to drop (~30s) → tunnel │
+│  5. Create Cloudflare QUICK tunnel (random URL, no account)    │
+│  6. Re-render /sub + /panel + /geo with the LIVE tunnel URL    │
+│  7. deploy-cf.sh: publish live sub to Cloudflare KV (seconds)  │
 │  8. Watchdog: health-check tunnel; auto-re-trigger next run    │
 │     ~8 min before the 240-min cap (zero-downtime handover)     │
-│  9. Upload artifacts (3-day retention)                          │
+│  9. Final step re-dispatches on ANY outcome (if: always())     │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      CLOUDFLARE EDGE                             │
 ├─────────────────────────────────────────────────────────────────┤
-│  • TLS termination                                              │
-│  • DDoS protection / WAF                                        │
-│  • Routes WS/gRPC/HU to tunnel                                  │
-│  • Serves static /sub, /panel, /geo                             │
+│  • Worker + KV: serves /sub, /panel, /geo, /  — ALWAYS ON,      │
+│    fast, independent of the runner (replaces GitHub Pages)       │
+│  • Quick tunnel: routes WS/gRPC/HU to the live runner           │
 └─────────────────────────────────────────────────────────────────┘
 ```
-**GITHUB PAGES (always-on, even when the runner is offline):**
-- Serves `/panel`, `/sub.txt`, and `/geo/*` 24/7 via `gh-pages` branch
-- Refreshed by Job 1 (`render`) on every run, independently of the tunnel
+
+**CLOUDFLARE WORKER + KV (always-on, even when the runner is offline):**
+- Serves `/panel`, `/sub.txt`, `/sub`, `/geo/*`, and `/` 24/7 from Workers KV
+- Refreshed by Job 1 (`render`) on every run, and by Job 2 with the **live
+  tunnel URL** seconds after the tunnel boots (quick-tunnel URL rotates every run)
+- Deployed by `deploy-cf.sh` — needs only `CF_TOKEN` (self-discovers the
+  account, creates the KV namespace, uploads assets + Worker)
 
 **Stealth features:**
 - Each run has unique `workflow name` = `Build & Deploy <run_id>`
@@ -204,8 +222,13 @@ The panel's **🔗 External Subs** tab shows all sources and merge status.
 ## 🛠️ Local Development
 
 ```bash
-# Run locally (requires CF tokens)
-CF_DOMAIN=proxy.example.com CF_AUTHTOKEN=xxx ./proxy.sh
+# Full local run (quick tunnel, zero config)
+./proxy.sh
+
+# Render + deploy assets to Cloudflare from your laptop (no tunnel needed)
+CF_TOKEN=xxx ./update-assets.sh
+# Use the same SEED as CI so configs stay identical:
+CF_TOKEN=xxx SEED=my-secret ./update-assets.sh
 
 # Test panel rendering
 export DOMAIN=test.example.com

@@ -4,36 +4,37 @@ on:
   push:
     branches: [master]
   schedule:
-    # Every 6 hours — guarantees a fresh run even if the self-retrigger chain breaks.
-    # Combined with AUTO_RETRIGGER (fires ~8 min before 240-min cap), this keeps
-    # the proxy alive 24/7 with zero-downtime handovers.
+    # Safety net: guarantees a fresh run even if the self-retrigger chain breaks.
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ⚠️  STEALTH CONFIGURATION
-#  ──────────────────────────────
-#  • Keeps running 24/7 via auto-re-trigger (like before)
-#  • Each run randomizes: startup delay, run ID, commit SHA, workflow name
-#  • Random commit on re-trigger (looks like human activity)
-#  • Hard timeout prevents runaway billing
-#  • Short artifact retention (3d) — less evidence left behind
+#  STEALTH CONFIGURATION
+#  • Runs 24/7 via auto-re-trigger: AUTO_RETRIGGER inside proxy.sh fires the
+#    next run ~8 min before the 240-min cap, and the final step re-dispatches
+#    on ANY outcome (if: always()) so a failed/timed-out run is followed up.
+#  • Static assets (sub/panel/geo/index) are served from Cloudflare Workers+KV
+#    — deployed by deploy-cf.sh, always-on, fast, independent of the tunnel.
+#  • Only TWO secrets required: GH_TOKEN (optional PAT) + CF_TOKEN.
+#    No tunnel token, no tunnel domain — the proxy always uses the zero-config
+#    quick tunnel (random trycloudflare.com URL, rotated every run, published
+#    to the Worker within seconds of the tunnel booting).
 #
-#  TWO JOBS:
-#  • render — RENDER_ONLY=1: generates sub/panel/geo assets fast (~2 min),
-#    uploads artifacts, deploys to GitHub Pages. Pages updates immediately
-#    on every push/retrigger, no longer waiting for the 240-min proxy job.
-#  • proxy  — runs the real long-lived tunnel (up to 240 min), keeps the
-#    proxy reachable 24/7, re-triggers itself at the end.
+#  TWO JOBS (proxy independent of render — the tunnel must never wait on
+#  asset publishing):
+#  • render — RENDER_ONLY=1: generates sub/panel/geo fast (~2 min), deploys
+#    to Cloudflare Worker+KV. Runs on every push/retrigger.
+#  • proxy  — runs the real long-lived tunnel (up to 240 min), publishes the
+#    live tunnel URL to the Worker at boot, re-triggers at the end.
 #
 #  ZERO-DOWNTIME HANDOVER (no concurrency group — intentional):
 #  • A concurrency group with cancel-in-progress:true would kill the old
 #    tunnel the instant the new run starts; with :false the new run would
-#    queue and only boot AFTER the old dies (several minutes of downtime).
+#    queue and only boot AFTER the old dies (minutes of downtime).
 #  • Instead: proxy.sh fires the next run ~8 min before its 240-min cap
 #    (AUTO_RETRIGGER=1), the successor boots while the old tunnel is still
 #    up, then waits on a tunnel handover lock until the old endpoint drops
-#    (~10s poll) and registers its own tunnel. Downtime: ~30 seconds.
+#    and registers its own tunnel. Downtime: ~30 seconds.
 #  • Safety: two tunnels can never run simultaneously (lock defers/exits).
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -41,13 +42,14 @@ permissions:
   actions: write
   contents: write
 
+env:
+  EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
+  # Set automatically by deploy-cf.sh after the first deploy (repo variable).
+  WORKER_URL: ${{ vars.WORKER_URL }}
+
 jobs:
   render:
     runs-on: ubuntu-latest
-    env:
-      EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
-      PAGES_URL: ${{ vars.PAGES_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
-
     timeout-minutes: 15
 
     steps:
@@ -55,22 +57,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Make script executable
-        run: chmod +x proxy.sh
+      - name: Make scripts executable
+        run: chmod +x proxy.sh deploy-cf.sh
 
       - name: ⚡ Render assets (RENDER_ONLY)
         id: render
         env:
-          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
-          CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
-          PAGES_URL: ${{ env.PAGES_URL }}
+          WORKER_URL: ${{ env.WORKER_URL }}
           RENDER_ONLY: "1"
+          SEED: ${{ secrets.CF_TOKEN || github.repository }}
         run: |
           mkdir -p logs
           set -o pipefail
           echo "::group::Render Output"
           ./proxy.sh 2>&1 | tee logs/render.log
+          echo "::endgroup::"
+
+      - name: ☁️ Deploy assets to Cloudflare Worker + KV
+        id: deploy
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        run: |
+          mkdir -p logs
+          echo "::group::Cloudflare Deploy"
+          ./deploy-cf.sh 2>&1 | tee -a logs/render.log
           echo "::endgroup::"
 
       - name: 📤 Upload artifacts
@@ -85,66 +96,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: 📦 Deploy static assets to GitHub Pages
-        if: always()
-        env:
-          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
-        run: |
-          # Prepare Pages content from generated files
-          mkdir -p _site
-          cp -r sub/* _site/ 2>/dev/null || true
-          cp -r geo _site/ 2>/dev/null || true
-          # Subscription reachable as /sub (base64, for clients) AND
-          # /sub.txt (text/plain so browsers display it instead of downloading)
-          cp _site/subscription.b64 _site/sub 2>/dev/null || true
-          cp _site/subscription.b64 _site/sub.txt 2>/dev/null || true
-
-          # Configure git for Pages branch
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 🛡️ Preserve the custom domain: GitHub Pages stores it in a CNAME
-          # file on the gh-pages branch. A force-push wipes it, which resets
-          # the custom domain in the Pages settings. Prefer the CUSTOM_DOMAIN
-          # repo variable (set once, never reset), else keep the branch's
-          # current CNAME.
-          # Note: actions/checkout fetches ONLY the current branch, so fetch
-          # gh-pages explicitly before reading its CNAME.
-          git fetch origin gh-pages:refs/remotes/origin/gh-pages 2>/dev/null || true
-          CNAME_CONTENT="${CUSTOM_DOMAIN:-$(git show origin/gh-pages:CNAME 2>/dev/null || true)}"
-
-          # Create or switch to gh-pages branch (orphan, no history)
-          git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
-          git rm -rf . 2>/dev/null || true
-          # Remove untracked generated dirs (sub/, geo/, logs/) — git rm only
-          # removes tracked files, and cp would fail trying to overwrite
-          # directory ./sub with the _site/sub file.
-          rm -rf sub geo logs _site/.git 2>/dev/null || true
-          cp -r _site/. .
-          rm -rf _site   # don't commit the staging dir itself
-          touch .nojekyll
-          # Restore the custom domain so GitHub doesn't reset it
-          if [ -n "$CNAME_CONTENT" ]; then
-            printf '%s\n' "$CNAME_CONTENT" > CNAME
-            echo "✅ Preserved custom domain: $CNAME_CONTENT"
-          fi
-
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "🌐 Update panel & sub [run:${{ github.run_id }}]"
-            git push -f origin gh-pages
-            echo "✅ Pages deployed to https://<user>.github.io/gayroxy/"
-          else
-            echo "No changes to deploy"
-          fi
-
   proxy:
     needs: []
     runs-on: ubuntu-latest
-    env:
-      EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
-      PAGES_URL: ${{ vars.PAGES_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
-
     timeout-minutes: 240
 
     steps:
@@ -152,21 +106,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Make script executable
-        run: chmod +x proxy.sh .github/retrigger.sh
+      - name: Make scripts executable
+        run: chmod +x proxy.sh deploy-cf.sh .github/retrigger.sh
 
       - name: ▶️ Run proxy (long-lived tunnel)
         id: proxy
         env:
-          # Both OPTIONAL now — quick-tunnel mode (zero config) is used when
-          # these are unset. Set them only for a custom domain.
-          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
-          CF_AUTHTOKEN: ${{ secrets.CF_AUTHTOKEN }}
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
-          PAGES_URL: ${{ env.PAGES_URL }}
+          WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "1"
-          # GITHUB_TOKEN (built-in) can trigger workflow_dispatch — no PAT needed.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT preferred (higher rate limits), built-in token as fallback.
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          SEED: ${{ secrets.CF_TOKEN || github.repository }}
         run: |
           mkdir -p logs
           set -o pipefail
@@ -174,50 +125,34 @@ jobs:
           ./proxy.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
 
-      - name: 🌐 Re-deploy Pages with live tunnel URL (quick-tunnel mode)
-        # In quick-tunnel mode the tunnel URL changes every run, so the render
-        # job's sub is stale. Re-render with the live URL and push to Pages.
-        # Named-tunnel mode skips this (URL is stable).
-        if: always() && env.CF_DOMAIN == ''
+      - name: ☁️ Publish live tunnel URL to Worker (quick-tunnel mode)
+        # Quick-tunnel URL changes every run, so the render job's sub is stale.
+        # Re-render with the live URL and push to Cloudflare KV immediately —
+        # clients re-importing the sub get the fresh URL within seconds.
+        if: always()
         env:
-          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+          SEED: ${{ secrets.CF_TOKEN || github.repository }}
         run: |
-          # Extract the live tunnel URL from the proxy logs
           TUNNEL_URL=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' logs/run.log | head -1 || true)
           if [ -z "$TUNNEL_URL" ]; then
-            echo "No quick-tunnel URL found — skipping Pages re-deploy"
+            echo "No quick-tunnel URL found — skipping publish"
             exit 0
           fi
           echo "Live tunnel URL: $TUNNEL_URL"
-          # Re-render assets with the live URL. Pass it as TUNNEL_DOMAIN so
-          # proxy.sh's domain-selection chain picks it directly (PAGES_URL would
-          # try to fetch <PAGES_URL>/sub.txt — circular, and the tunnel is down
-          # by the time this step runs, so it'd fall back to a placeholder).
+          echo "::group::Re-render with live URL"
           env RENDER_ONLY=1 \
             TUNNEL_DOMAIN="$TUNNEL_URL" \
-            PAGES_URL="https://${TUNNEL_URL}" \
-            EXTERNAL_SUB_URLS="${{ env.EXTERNAL_SUB_URLS }}" \
-            SEED="${{ secrets.CF_AUTHTOKEN || github.repository }}" \
+            WORKER_URL="$WORKER_URL" \
+            EXTERNAL_SUB_URLS="$EXTERNAL_SUB_URLS" \
+            SEED="$SEED" \
             ./proxy.sh
-          # Deploy to gh-pages
-          cd "$GITHUB_WORKSPACE"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # 🛡️ Preserve the custom domain (see render job — force-push wipes CNAME)
-          git fetch origin gh-pages:refs/remotes/origin/gh-pages 2>/dev/null || true
-          CNAME_CONTENT="${CUSTOM_DOMAIN:-$(git show origin/gh-pages:CNAME 2>/dev/null || true)}"
-          git checkout --orphan gh-pages 2>/dev/null || git checkout gh-pages
-          git rm -rf . 2>/dev/null || true
-          rm -rf sub geo logs _site/.git 2>/dev/null || true
-          cp -r sub panel.html geo . 2>/dev/null || true
-          rm -rf _site
-          touch .nojekyll
-          if [ -n "$CNAME_CONTENT" ]; then
-            printf '%s\n' "$CNAME_CONTENT" > CNAME
-            echo "✅ Preserved custom domain: $CNAME_CONTENT"
-          fi
-          git add -A
-          git diff --cached --quiet || { git commit -m "🌐 Update with live tunnel URL [run:${{ github.run_id }}]"; git push -f origin gh-pages; }
+          echo "::endgroup::"
+          echo "::group::Deploy live sub to Cloudflare"
+          ./deploy-cf.sh
+          echo "::endgroup::"
 
       - name: 📤 Upload artifacts
         if: always()
@@ -231,11 +166,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: 🔄 Re-trigger (keep alive — legacy retrigger.sh, now backup)
+      - name: 🔄 Re-trigger (keep alive — runs on ANY outcome, incl. failure/timeout)
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
-          PAGES_URL: ${{ env.PAGES_URL }}
-        run: |
-          .github/retrigger.sh
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+        run: .github/retrigger.sh

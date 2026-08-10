@@ -12,8 +12,8 @@ tunnel_url() {
     if [[ -n "${CF_DOMAIN:-}" ]]; then
         echo "https://${CF_DOMAIN}/sub"
     else
-        # quick tunnel: read the URL published on Pages by the live run
-        curl -sL --max-time 8 "${PAGES_URL:-}/sub.txt" 2>/dev/null \
+        # quick tunnel: read the URL published on the Worker (KV) by the live run
+        curl -sL --max-time 8 "${WORKER_URL:-}/sub.txt" 2>/dev/null \
             | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 \
             | sed 's#^#https://#; s#$#/sub#'
     fi
