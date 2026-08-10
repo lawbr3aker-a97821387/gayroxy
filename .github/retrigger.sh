@@ -72,7 +72,7 @@ echo "::endgroup::"
 NEXT=$(gh run list --workflow "$WF_NAME" --branch "${GITHUB_REF_NAME:-master}" \
   --json databaseId,status --jq \
   '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .status != "completed") | "\(.databaseId)|\(.status)"' \
-  | head -1)
+  | head -1 || true)
 
 if [[ -z "$NEXT" ]]; then
   echo "No new run — dispatching again..."
