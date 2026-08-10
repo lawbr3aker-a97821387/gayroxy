@@ -548,7 +548,7 @@ else
             tail -n 20 "${CLOUDFLARED_LOG}" 2>/dev/null || true
             exit 1
         fi
-        TUNNEL_DOMAIN=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' "${CLOUDFLARED_LOG}" 2>/dev/null | head -1)
+        TUNNEL_DOMAIN=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' "${CLOUDFLARED_LOG}" 2>/dev/null | head -1 || true)
         [[ -n "$TUNNEL_DOMAIN" ]] && break
     done
 

@@ -80,6 +80,7 @@ jobs:
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
         run: |
           mkdir -p logs
+          set -o pipefail
           echo "::group::Cloudflare Deploy"
           ./deploy-cf.sh 2>&1 | tee -a logs/render.log
           echo "::endgroup::"

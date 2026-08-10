@@ -11,18 +11,18 @@ set -euo pipefail
 tunnel_url() {
     if [[ -n "${CF_DOMAIN:-}" ]]; then
         echo "https://${CF_DOMAIN}/sub"
-    else
+    elif [[ -n "${WORKER_URL:-}" ]]; then
         # quick tunnel: read the URL published on the Worker (KV) by the live run
-        curl -sL --max-time 8 "${WORKER_URL:-}/sub.txt" 2>/dev/null \
+        curl -sL --max-time 8 "${WORKER_URL}/sub.txt" 2>/dev/null \
             | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 \
-            | sed 's#^#https://#; s#$#/sub#'
+            | sed 's#^#https://#; s#$#/sub#' || true
     fi
 }
 
 # If a tunnel is already live (handover in progress / another run took over),
 # do NOT dispatch another run — that would snowball redundant runs. The live
 # run's own AUTO_RETRIGGER will spawn the successor before it times out.
-TUNNEL_URL=$(tunnel_url)
+TUNNEL_URL=$(tunnel_url || true)
 if [[ -n "$TUNNEL_URL" ]] && curl -sf -o /dev/null --max-time 8 "$TUNNEL_URL" 2>/dev/null; then
     echo "Tunnel already live ($TUNNEL_URL) — skipping re-trigger (handover in progress)."
     exit 0
