@@ -103,7 +103,14 @@ jobs:
           retention-days: 3
 
   proxy:
-    needs: []
+    # needs: render — guarantees the render job's deploy (stale/placeholder sub)
+    # lands FIRST, then LIVE_DEPLOY inside proxy.sh overwrites KV with the live
+    # tunnel URL. Without this, the two independent deploys could race and leave
+    # a dead URL in KV for the whole cycle.
+    # if: always() — a render failure must NOT kill the tunnel: the proxy job
+    # still boots its own tunnel and LIVE_DEPLOY still publishes a working sub.
+    needs: render
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
@@ -121,6 +128,7 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "1"
+          LIVE_DEPLOY: "1"
           # PAT preferred (higher rate limits), built-in token as fallback.
           GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           SEED: ${{ secrets.CF_TOKEN || github.repository }}
@@ -131,34 +139,11 @@ jobs:
           ./proxy.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
 
-      - name: ☁️ Publish live tunnel URL to Worker (quick-tunnel mode)
-        # Quick-tunnel URL changes every run, so the render job's sub is stale.
-        # Re-render with the live URL and push to Cloudflare KV immediately —
-        # clients re-importing the sub get the fresh URL within seconds.
-        if: always()
-        env:
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
-          EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
-          WORKER_URL: ${{ env.WORKER_URL }}
-          SEED: ${{ secrets.CF_TOKEN || github.repository }}
-        run: |
-          TUNNEL_URL=$(grep -oP 'https://\K[a-z0-9-]+\.trycloudflare\.com' logs/run.log | head -1 || true)
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "No quick-tunnel URL found — skipping publish"
-            exit 0
-          fi
-          echo "Live tunnel URL: $TUNNEL_URL"
-          echo "::group::Re-render with live URL"
-          env RENDER_ONLY=1 \
-            TUNNEL_DOMAIN="$TUNNEL_URL" \
-            WORKER_URL="$WORKER_URL" \
-            EXTERNAL_SUB_URLS="$EXTERNAL_SUB_URLS" \
-            SEED="$SEED" \
-            ./proxy.sh
-          echo "::endgroup::"
-          echo "::group::Deploy live sub to Cloudflare"
-          ./deploy-cf.sh
-          echo "::endgroup::"
+      # No run-end ☁️ Publish step: LIVE_DEPLOY=1 inside proxy.sh publishes the
+      # live tunnel URL to Cloudflare within seconds of boot (the sub is
+      # rendered with the real URL at that moment). A run-end re-deploy would
+      # publish a URL whose tunnel is already dying — clients would import a
+      # dead sub for the whole next cycle.
 
       - name: 📤 Upload artifacts
         if: always()

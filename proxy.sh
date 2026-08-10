@@ -54,6 +54,12 @@ SEED="${SEED:-${CF_AUTHTOKEN:-${GITHUB_REPOSITORY:-gayroxy}}}"
 # Used by CI to deploy Pages quickly; the long-lived tunnel runs in a later step.
 RENDER_ONLY="${RENDER_ONLY:-0}"
 
+# LIVE_DEPLOY=1 (CI proxy job only): after the quick tunnel boots and the sub
+# is rendered with the REAL live URL, immediately push everything to Cloudflare
+# (deploy-cf.sh). This is what makes sub.txt point at a working tunnel within
+# seconds of boot — NOT at run end (by then the tunnel is dying).
+LIVE_DEPLOY="${LIVE_DEPLOY:-0}"
+
 # Reality TLS fronting target (stealth). Change if www.cloudflare.com is flagged;
 # any major TLS site works. Must match in config.json, client URL and panel.
 REALITY_SNI="${REALITY_SNI:-www.cloudflare.com}"
@@ -850,6 +856,25 @@ echo -e "  ${YEL}Quick link:${NC} ${VLESS_URL}"
 echo ""
 echo "=========================================="
 echo ""
+
+# ─── Live deploy (publish-at-boot) ─────────────────────────────────────────
+# CI proxy job: the quick tunnel is UP and the sub/panel/geo above were
+# rendered with the REAL live URL. Push them to Cloudflare NOW so clients
+# re-importing sub.txt get a working tunnel within seconds of boot.
+# (The workflow's old run-end Publish step published a dying URL — removed.)
+if [[ "$LIVE_DEPLOY" == "1" && "$RENDER_ONLY" != "1" ]]; then
+    log "LIVE_DEPLOY — publishing live assets to Cloudflare (tunnel: ${DOMAIN})..."
+    if [[ -z "${CF_TOKEN:-}" ]]; then
+        warn "LIVE_DEPLOY set but CF_TOKEN missing — skipping Cloudflare push."
+        warn "(The deploy step in CI normally provides CF_TOKEN.)"
+    else
+        if "${PWD}/deploy-cf.sh"; then
+            log "Live assets published: sub.txt now points at https://${DOMAIN}"
+        else
+            warn "deploy-cf.sh failed — live URL not published (see logs above)."
+        fi
+    fi
+fi
 
 # RENDER_ONLY mode: done after assets are generated (no long-lived process)
 if [[ "$RENDER_ONLY" == "1" ]]; then
