@@ -53,8 +53,14 @@ fi
 api() {
     local method="$1" path="$2"
     shift 2
-    local resp
-    resp=$(curl -sS -X "$method" -H "Authorization: Bearer ${CF_TOKEN}" "$@" "${API}${path}") \
+    local resp hdr=()
+    # JSON bodies (--data) must declare application/json or Cloudflare rejects
+    # them with error 10010; --data-binary file uploads and -F multipart are
+    # sent as-is (their own Content-Type applies).
+    for a in "$@"; do
+        if [[ "$a" == "--data" ]]; then hdr=(-H "Content-Type: application/json"); break; fi
+    done
+    resp=$(curl -sS -X "$method" -H "Authorization: Bearer ${CF_TOKEN}" "${hdr[@]}" "$@" "${API}${path}") \
         || { echo "ERROR: curl failed on ${method} ${path}" >&2; exit 1; }
     echo "$resp" | python3 -c '
 import json, sys
@@ -142,8 +148,22 @@ log "Uploading Worker '${SCRIPT_NAME}'..."
 METADATA="{\"main_module\":\"index.js\",\"compatibility_date\":\"2024-11-01\",\"bindings\":[{\"name\":\"ASSETS\",\"type\":\"kv_namespace\",\"namespace_id\":\"${NS_ID}\"}]}"
 api PUT "/accounts/${ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}" \
     -F "metadata=${METADATA};type=application/json" \
-    -F "index.js=@${WORKDIR}/worker/index.js;type=application/javascript" >/dev/null
+    -F "index.js=@${WORKDIR}/worker/index.js;type=application/javascript+module" >/dev/null
 log "Worker deployed."
+
+# ─── 4b. Enable the workers.dev subdomain route for this script ────────────
+# A freshly-uploaded Worker is NOT reachable on <script>.<sub>.workers.dev
+# by default — the script/subdomain route is disabled, and every request 1042s
+# with "error code: 1042" until it's turned on. Enable it explicitly here.
+# Non-fatal: api() exits on failure, so run in a subshell; a failure here
+# (already enabled, transient API error) must NOT abort an otherwise-good deploy.
+if ( api POST "/accounts/${ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}/subdomain" \
+        --data '{"enabled":true}' >/dev/null ); then
+    log "workers.dev route enabled."
+else
+    warn "Could not enable workers.dev route (may already be on, or API error).
+          If 1042s persist, toggle it in the dashboard and re-run."
+fi
 
 # ─── 5. Print the live URL ───────────────────────────────────────────────────
 SUBDOMAIN=$(api GET "/accounts/${ACCOUNT_ID}/workers/subdomain" \
