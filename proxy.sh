@@ -30,12 +30,12 @@ PORT_VMESS_HU=10016
 WARP_PORT=${WARP_PORT:-40000}
 
 # Cloudflare variables — OPTIONAL. Two tunnel modes:
-#   NAMED TUNNEL: CF_AUTHTOKEN + CF_DOMAIN set → custom domain
+#   NAMED TUNNEL: CF_TUNNEL_TOKEN + CF_ROUTE set → custom domain
 #                 (requires a Cloudflare account + a domain on it).
 #   QUICK TUNNEL: neither set → free random trycloudflare.com URL,
 #                 zero requirements (no account, no token, no domain).
-CF_AUTHTOKEN="${CF_AUTHTOKEN:-}"
-CF_DOMAIN="${CF_DOMAIN:-}"
+CF_TUNNEL_TOKEN="${CF_TUNNEL_TOKEN:-}"
+CF_ROUTE="${CF_ROUTE:-}"
 
 # Cloudflare Worker URL for always-on static assets (sub/panel/geo served
 # from Workers KV — the "Pages replacement"). e.g. https://gayroxy.<acct>.workers.dev
@@ -43,12 +43,12 @@ CF_DOMAIN="${CF_DOMAIN:-}"
 # the first deploy). Optional: when unset, the tunnel domain is the fallback and
 # the quick-tunnel re-deploy step publishes the live URL a few minutes later.
 # Trailing slash stripped so joins like ${WORKER_URL}/sub.txt don't double-slash.
-WORKER_URL="${WORKER_URL:-${PAGES_URL:-${CF_DOMAIN:+https://${CF_DOMAIN}}}}"
+WORKER_URL="${WORKER_URL:-${PAGES_URL:-${CF_ROUTE:+https://${CF_ROUTE}}}}"
 WORKER_URL="${WORKER_URL%/}"
 
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
 # (quick-tunnel mode has no CF token, so fall back to repo identity).
-SEED="${SEED:-${CF_AUTHTOKEN:-${GITHUB_REPOSITORY:-gayroxy}}}"
+SEED="${SEED:-${CF_TUNNEL_TOKEN:-${GITHUB_REPOSITORY:-gayroxy}}}"
 
 # RENDER_ONLY=1: generate assets (sub/panel/geo) without starting any services.
 # Used by CI to deploy Pages quickly; the long-lived tunnel runs in a later step.
@@ -92,7 +92,7 @@ warn()  { echo -e "${YEL}[proxy.sh] WARNING${NC} $1"; }
 error() { echo -e "${RED}[proxy.sh] ERROR${NC} $1"; }
 
 help_msg() { cat <<'EOF'
-Usage: CF_AUTHTOKEN=xxx CF_DOMAIN=proxy.example.com ./proxy.sh
+Usage: CF_TUNNEL_TOKEN=xxx CF_ROUTE=proxy.example.com ./proxy.sh
 EOF
 }
 for arg in "$@"; do case "$arg" in -h|--help) help_msg; exit 0;; esac; done
@@ -491,9 +491,9 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
 # into thinking a dead tunnel was alive (chain died silently). We probe /sub
 # which nginx always serves while the proxy runs.
 tunnel_alive() {
-    curl -sf -o /dev/null --max-time 8 "https://${CF_DOMAIN}/sub" 2>/dev/null
+    curl -sf -o /dev/null --max-time 8 "https://${CF_ROUTE}/sub" 2>/dev/null
 }
-if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_DOMAIN" ]]; then
+if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_ROUTE" ]]; then
     lock_attempts=0
     lock_max=$(( (RETRIGGER_LEAD_MIN + 3) * 60 / 10 ))   # ~11 min at 10s ticks
     while (( lock_attempts < lock_max )); do
@@ -513,9 +513,9 @@ fi
 # ─── Start Cloudflare Tunnel ────────────────────────────────────────────────
 CLOUDFLARED_LOG="${LOG_DIR}/cloudflared.log"
 TUNNEL_DOMAIN=""
-if [[ -n "$CF_AUTHTOKEN" && -n "$CF_DOMAIN" ]]; then
+if [[ -n "$CF_TUNNEL_TOKEN" && -n "$CF_ROUTE" ]]; then
 
-    "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "${CF_AUTHTOKEN}" --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
+    "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "${CF_TUNNEL_TOKEN}" --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
     CLOUDFLARED_PID=$!
 
     MAX_RETRIES=30
@@ -538,8 +538,8 @@ if [[ -n "$CF_AUTHTOKEN" && -n "$CF_DOMAIN" ]]; then
         tail -n 30 "${CLOUDFLARED_LOG}" || true
         exit 1
     fi
-    TUNNEL_DOMAIN="$CF_DOMAIN"
-    log "Cloudflare tunnel established for domain: ${CF_DOMAIN}"
+    TUNNEL_DOMAIN="$CF_ROUTE"
+    log "Cloudflare tunnel established for domain: ${CF_ROUTE}"
 else
     # QUICK TUNNEL — zero-config mode: no account, no token, no domain.
     # cloudflared gets a fresh random https://<random>.trycloudflare.com URL.
@@ -575,8 +575,8 @@ fi   # end RENDER_ONLY guard (services block)
 # its tunnel boots.
 if [[ -n "$TUNNEL_DOMAIN" ]]; then
     DOMAIN="$TUNNEL_DOMAIN"
-elif [[ -n "$CF_DOMAIN" ]]; then
-    DOMAIN="$CF_DOMAIN"
+elif [[ -n "$CF_ROUTE" ]]; then
+    DOMAIN="$CF_ROUTE"
 else
     DOMAIN=$(curl -sL --max-time 8 "${WORKER_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 || true)
     DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"

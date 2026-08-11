@@ -1,4 +1,12 @@
 name: Build & Deploy Proxy
+
+# ─── Single-run policy ────────────────────────────────────────────────────
+# Only ONE run may be in progress at a time. When a new run starts (push,
+# schedule, or dispatch), every older run is cancelled immediately — no
+# overlapping proxy jobs, no retrigger dispatch storms.
+concurrency:
+  group: gayroxy-deploy
+  cancel-in-progress: true
 run-name: Build & Deploy ${{ github.run_id }}
 on:
   push:
@@ -15,10 +23,10 @@ on:
 #    on ANY outcome (if: always()) so a failed/timed-out run is followed up.
 #  • Static assets (sub/panel/geo/index) are served from Cloudflare Workers+KV
 #    — deployed by deploy-cf.sh, always-on, fast, independent of the tunnel.
-#  • Only TWO secrets required: GH_TOKEN (optional PAT) + CF_TOKEN.
-#    No tunnel token, no tunnel domain — the proxy always uses the zero-config
-#    quick tunnel (random trycloudflare.com URL, rotated every run, published
-#    to the Worker within seconds of the tunnel booting).
+#  • Tunnel: NAMED TUNNEL when CF_ROUTE + CF_TUNNEL_TOKEN are set (stable
+#    custom domain — configs never change across runs); otherwise the
+#    zero-config QUICK TUNNEL (random trycloudflare.com URL, rotated every
+#    run, published to the Worker within seconds of the tunnel booting).
 #
 #  TWO JOBS (proxy independent of render — the tunnel must never wait on
 #  asset publishing):
@@ -27,15 +35,12 @@ on:
 #  • proxy  — runs the real long-lived tunnel (up to 240 min), publishes the
 #    live tunnel URL to the Worker at boot, re-triggers at the end.
 #
-#  ZERO-DOWNTIME HANDOVER (no concurrency group — intentional):
-#  • A concurrency group with cancel-in-progress:true would kill the old
-#    tunnel the instant the new run starts; with :false the new run would
-#    queue and only boot AFTER the old dies (minutes of downtime).
-#  • Instead: proxy.sh fires the next run ~8 min before its 240-min cap
-#    (AUTO_RETRIGGER=1), the successor boots while the old tunnel is still
-#    up, then waits on a tunnel handover lock until the old endpoint drops
-#    and registers its own tunnel. Downtime: ~30 seconds.
-#  • Safety: two tunnels can never run simultaneously (lock defers/exits).
+#  SINGLE-RUN POLICY (concurrency group above):
+#  • Exactly ONE run in progress at a time. A new run cancels every older
+#    run the instant it starts — the old tunnel dies, the new run boots a
+#    fresh one. No overlapping proxy jobs, no dispatch storms.
+#  • retrigger.sh (always()) is the chain keeper: it only dispatches a
+#    successor when no other run is queued/in-progress.
 # ═══════════════════════════════════════════════════════════════════════════
 
 permissions:
@@ -51,6 +56,13 @@ env:
   # Variables → New variable: WORKER_DOMAIN). deploy-cf.sh binds it to the
   # Worker as a Workers Custom Domain (auto-DNS + managed TLS, free plan).
   WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
+  # NAMED TUNNEL (optional — old way): stable custom domain + cloudflared
+  # tunnel token. When both are set, proxy.sh runs `cloudflared tunnel run
+  # --token` on CF_ROUTE (configs never change across runs). When either is
+  # missing, it falls back to the random quick tunnel. Legacy secrets
+  # CF_DOMAIN/CF_AUTHTOKEN are mapped here so no new secrets are needed.
+  CF_ROUTE: ${{ secrets.CF_DOMAIN }}
+  CF_TUNNEL_TOKEN: ${{ secrets.CF_AUTHTOKEN }}
 
 jobs:
   render:

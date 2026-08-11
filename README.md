@@ -45,11 +45,21 @@ Go to **Settings → Secrets and variables → Actions**.
 | `CF_TOKEN` | ✅ | Cloudflare API token — **Workers Scripts:Edit**, **Workers KV Storage:Edit**, **Account Settings:Read** (see below) |
 | `GH_TOKEN` | ❌ | GitHub PAT with `repo` + `workflow` scope. Optional — the built-in `GITHUB_TOKEN` works, but a PAT has higher rate limits and survives repo transfer. |
 | `EXTERNAL_SUB_URLS` | ❌ | Comma-separated external subscription URLs to merge (unset → only the 15 built-in configs) |
+| `CF_ROUTE` | ❌ | Named-tunnel mode: the stable custom domain to serve the proxy on (e.g. `gayroxy.ai-masters.ir`). Must be paired with `CF_TUNNEL_TOKEN`. |
+| `CF_TUNNEL_TOKEN` | ❌ | Named-tunnel mode: the tunnel connection token (`cloudflared tunnel run --token`). Must be paired with `CF_ROUTE`. |
 
-> **That's it — two tokens max, one required.** No tunnel token, no tunnel
-> domain. The proxy always runs in **quick-tunnel mode** (zero-config
-> `trycloudflare.com` URL), and static assets are served from a **Cloudflare
-> Worker + KV** you own, not GitHub Pages.
+There are **two tunnel modes**:
+
+- **Named tunnel (recommended, stable configs):** set both `CF_ROUTE` and
+  `CF_TUNNEL_TOKEN`. The proxy runs on your own domain — the subscription
+  configs never change across runs, so users import **once** and stay valid
+  forever. Requires a Cloudflare account with a domain on it.
+- **Quick tunnel (zero-config fallback):** if either of the above is
+  unset, the proxy falls back to a free random `trycloudflare.com` URL
+  (rotated every run, published to the Worker within seconds of boot).
+
+Static assets are always served from a **Cloudflare Worker + KV** you own,
+not GitHub Pages.
 
 **Create `CF_TOKEN`** ([Cloudflare Dashboard → My Profile → API Tokens → Create Token](https://dash.cloudflare.com/profile/api-tokens)) with these permissions:
 
@@ -63,6 +73,9 @@ Go to **Settings → Secrets and variables → Actions**.
 ```bash
 gh secret set CF_TOKEN        # paste the token
 gh secret set GH_TOKEN        # optional PAT
+# Named-tunnel mode (optional): stable domain + tunnel token
+gh secret set CF_ROUTE
+gh secret set CF_TUNNEL_TOKEN
 ```
 
 ### 3. (Optional) Custom domain for the panel/sub
@@ -134,6 +147,8 @@ live tunnel URL, and re-triggers itself 24/7.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CF_TOKEN` | — | **Required.** CF API token (Workers Scripts:Edit + Workers KV Storage:Edit + Account Settings:Read). Used to deploy the Worker + KV. Also the default `SEED`. |
+| `CF_ROUTE` | — | **Optional (named tunnel).** Stable custom domain for the proxy, e.g. `gayroxy.ai-masters.ir`. Requires `CF_TUNNEL_TOKEN`. When set, configs never change across runs. |
+| `CF_TUNNEL_TOKEN` | — | **Optional (named tunnel).** Tunnel connection token (`cloudflared tunnel run --token`). Requires `CF_ROUTE`. When either is unset → quick-tunnel fallback. |
 | `EXTERNAL_SUB_URLS` | — (none) | Comma-separated external subscription URLs to merge into the panel. Unset → only the 15 built-in Gayroxy configs are served. |
 | `WORKER_URL` | — | **Repo variable** (`vars.WORKER_URL`) — the Cloudflare Worker URL, saved automatically by `deploy-cf.sh` after the first deploy. |
 | `WORKER_DOMAIN` | — | **Repo variable** (optional, recommended) — static custom domain for the pages, e.g. `gayroxy-cf.ai-masters.ir`; bound as a Workers Custom Domain (auto-DNS + managed TLS). Requires the zone on the same CF account + Zone:Read / Workers Routes:Edit / DNS:Edit. |
