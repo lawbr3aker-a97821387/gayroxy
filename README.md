@@ -233,6 +233,54 @@ The panel's **🔗 External Subs** tab shows all sources and merge status.
 
 ---
 
+## 🔁 Reliability & Failover
+
+**Single-run policy (hard invariant):** the workflow uses a concurrency group
+(`gayroxy-deploy`, `cancel-in-progress: true`) — at most **one** run is
+in_progress at any time. A new run (push / schedule / dispatch / keepalive)
+cancels any older run the moment it starts, so there is never a dispatch storm
+or overlapping tunnels. Configs stay byte-identical across runs (deterministic
+`SEED`), so users never re-import subscriptions.
+
+**Boot verification (per run):** after cloudflared + xray start, the proxy
+job verifies end-to-end before declaring the run healthy — xray process alive
+**and** the public endpoint `https://<DOMAIN>/sub` returns HTTP 200
+(`BOOT_VERIFY_TIMEOUT=60s`, 5s retries). Failure to boot within the window
+exits non-zero → the run's `always()` step re-dispatches → the concurrency
+group cancels the failed run → a fresh run retries. This restores the old
+"retry until 100% running" behavior **without** the dispatch storm.
+
+**Keepalive watchdog (`keepalive.yml`, every 15 min):** a scheduled safety net
+that guarantees the chain never silently dies:
+- If a run is **in_progress**, the queue is serialized behind it (concurrency
+  group) — queued runs are healthy and left alone.
+- If **no** run is in_progress but a run has been stuck in `queued` > 6 min,
+  the queue is wedged (no runner will pick it up) → it is cancelled.
+- If **no** run is active at all (chain dead) → a fresh run is dispatched.
+
+**Dead-gap tradeoff:** GitHub-hosted runners are ephemeral — between runs there
+is a short window (runner teardown + successor boot, roughly 10–60 s) with no
+tunnel, during which the Cloudflare edge serves 502/522 for tunneled paths
+(`/sub` and `/panel` keep working via the Worker + KV, which are always on).
+Three mitigations keep the gap small:
+- `RETRIGGER_LEAD_MIN` — the outgoing run dispatches its successor before the
+  240-min cap, so the next runner boots while the old tunnel is still up.
+- The **named tunnel** (`CF_ROUTE`) keeps a stable hostname; the route stays
+  pinned at the edge and only the origin blips during the gap.
+- Failed boots fail fast (boot-verify) so a broken run is replaced quickly
+  instead of serving errors until its timeout.
+
+**Runtime watchdog:** while serving, the proxy job health-checks the public
+endpoint every 20 s; after 3 consecutive failures (~60 s) the run exits so the
+retry cycle restarts the tunnel fast (tuned from 60 s × 5 = 5 min).
+
+**Performance:** geo databases and the xray binary are cached via
+`actions/cache` (ephemeral runners would otherwise re-download ~150 MB every
+run), and `deploy-cf.sh` skips KV uploads whose md5 hash is unchanged (stored
+in KV metadata) — unchanged runs upload nothing after the first deploy.
+
+---
+
 ## 📱 Client Setup
 
 ### Shadowrocket (iOS)
