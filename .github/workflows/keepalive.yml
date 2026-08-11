@@ -42,7 +42,8 @@ jobs:
           fetch-depth: 1
       - name: Self-heal the main workflow
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          # PAT is required — dispatch/cancel needs a token that outlives the run.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail

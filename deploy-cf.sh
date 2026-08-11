@@ -9,7 +9,7 @@
 # Usage:
 #   CF_TOKEN=xxx ./deploy-cf.sh                                   # deploy everything
 #   CF_TOKEN=xxx ./deploy-cf.sh --print-url                        # just print the worker URL
-#   CF_TOKEN=xxx WORKER_DOMAIN=gayroxy-cf.ai-masters.ir ./deploy-cf.sh  # + custom domain
+#   CF_TOKEN=xxx WORKER_DOMAIN=proxy.example.com ./deploy-cf.sh   # + custom domain
 #   CF_TOKEN=xxx WORKER_ROUTE=gayroxy.example.com ./deploy-cf.sh   # + legacy route (fallback)
 #
 # WORKER_DOMAIN (recommended): creates a Workers Custom Domain — a dedicated
@@ -215,17 +215,17 @@ else
     warn "dashboard (Workers & Pages → your subdomain) or set WORKER_DOMAIN."
 fi
 
-# ─── 6. Optional custom domain (recommended): gayroxy-cf.ai-masters.ir ──────
+# ─── 6. Optional custom domain (recommended): proxy.example.com ─────────────
 # Creates a Workers Custom Domain — a dedicated hostname with automatic DNS +
 # managed TLS certificate. This is the modern, recommended approach (works on
 # the free plan). Falls back to a legacy Workers Route if the custom-domain
 # API rejects the request (e.g. zone not on CF, or missing DNS:Edit permission).
 #
-# Env: WORKER_DOMAIN=gayroxy-cf.ai-masters.ir  (recommended)
+# Env: WORKER_DOMAIN=proxy.example.com  (recommended)
 #      WORKER_ROUTE=gayroxy.example.com        (legacy route fallback)
 #      WORKER_DOMAIN takes precedence over WORKER_ROUTE.
 if [[ -n "${WORKER_DOMAIN:-}" ]]; then
-    ZONE_NAME="${WORKER_DOMAIN#*.}"   # strip the first label → ai-masters.ir
+    ZONE_NAME="${WORKER_DOMAIN#*.}"   # strip the first label → example.com
     ZONES=$(api GET "/zones?name=${ZONE_NAME}&per_page=5")
     ZONE_ID=$(echo "$ZONES" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r[0]["id"] if r else "")')
     if [[ -z "$ZONE_ID" ]]; then
