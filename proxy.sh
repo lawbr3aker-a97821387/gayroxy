@@ -67,8 +67,9 @@ REALITY_SNI="${REALITY_SNI:-www.cloudflare.com}"
 # Tunnel watchdog (medium #5): every WATCHDOG_INTERVAL seconds check the tunnel
 # endpoint. After WATCHDOG_FAILS consecutive failures the run exits so the
 # re-trigger cycle restarts the tunnel fast instead of waiting out the 240-min cap.
-WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
-WATCHDOG_FAILS="${WATCHDOG_FAILS:-5}"
+# Tuned for fast failover: 20s × 3 = ~60s to detect a dead tunnel (was 60s × 5 = 5min).
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-20}"
+WATCHDOG_FAILS="${WATCHDOG_FAILS:-3}"
 
 # Auto re-trigger (high #1): when set, proxy.sh spawns a background dispatcher
 # that fires a fresh workflow run shortly before this run's timeout, so the next
@@ -337,6 +338,19 @@ download_geo() {
     local today=$(date +%F)
     local cache_base="${HOME}/.cache/gayroxy/geo/${today}"
     local cached=0
+
+    # If all required assets are already present (e.g. restored from the
+    # GitHub Actions cache), reuse them — no re-download of ~150MB per run.
+    local -a required=(Country.mmdb geoip.dat geosite.dat geoip.db geosite.db)
+    local missing=0 asset
+    for asset in "${required[@]}"; do
+        [[ -f "${GEO_DIR}/${asset}" ]] || missing=1
+    done
+    if (( missing == 0 )); then
+        log "geo: all ${#required[@]} assets present in GEO_DIR — reusing (cache hit)."
+        return 0
+    fi
+
     if [[ -d "${cache_base}" ]]; then
         mkdir -p "${GEO_DIR}"
         # Hardlink from cache to workspace (fast, no copy on same fs)
@@ -880,6 +894,36 @@ fi
 if [[ "$RENDER_ONLY" == "1" ]]; then
     log "RENDER_ONLY — assets generated. Skipping long-lived proxy (exit 0)."
     exit 0
+fi
+
+# ─── Boot verification (reliability) ──────────────────────────────────────
+# Confirm the PUBLIC endpoint serves end-to-end through the tunnel BEFORE
+# declaring this run healthy. xray+nginx being up locally is not enough —
+# the tunnel must actually reach the Cloudflare edge. If the public endpoint
+# never responds within BOOT_VERIFY_TIMEOUT, exit non-zero: GitHub marks the
+# job failed, and retrigger.sh (always()) fires a fresh run. This restores
+# the old "retry until 100% running" behavior — storm-safe thanks to the
+# concurrency group (at most one in-progress run at a time), and the failed
+# run's own always() step re-dispatches the next attempt.
+BOOT_VERIFY_TIMEOUT="${BOOT_VERIFY_TIMEOUT:-60}"   # seconds total
+log "boot-verify: checking public endpoint https://${DOMAIN}/sub (up to ${BOOT_VERIFY_TIMEOUT}s)..."
+boot_ok=0
+for ((i=1; i<=BOOT_VERIFY_TIMEOUT/5; i++)); do
+    if ! kill -0 "$XRAY_PID" 2>/dev/null; then
+        error "boot-verify: xray died during verification."
+        exit 1
+    fi
+    if curl -sf -o /dev/null --max-time 8 "https://${DOMAIN}/sub" 2>/dev/null; then
+        boot_ok=1
+        log "boot-verify: ✔ public endpoint responds (attempt ${i})"
+        break
+    fi
+    warn "boot-verify: endpoint not ready (attempt ${i}/$((BOOT_VERIFY_TIMEOUT/5))) — retrying..."
+    sleep 5
+done
+if [[ "$boot_ok" != "1" ]]; then
+    error "boot-verify: public endpoint unreachable within ${BOOT_VERIFY_TIMEOUT}s — exiting to trigger retry cycle."
+    exit 1
 fi
 
 # ─── Auto re-trigger (high #1) ─────────────────────────────────────────────

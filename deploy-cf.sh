@@ -107,6 +107,34 @@ if [[ -z "$NS_ID" ]]; then
 fi
 log "KV namespace: ${NS_ID}"
 
+# ─── KV content-hash skip (S4b) ─────────────────────────────────────────────
+# Before uploading, compare each local file's md5 against the metadata stored
+# on the remote KV key (set on PUT below). Unchanged files are skipped — with
+# the named tunnel the sub/panel/geo render identically every run, so only the
+# first deploy of a cycle actually uploads. Saves ~150MB of geo uploads plus
+# API calls per run.
+KV_MD5_MAP=""   # "key<TAB>md5" lines, built from the KV key list
+kv_load_hashes() {
+    local list
+    list=$(api GET "/accounts/${ACCOUNT_ID}/storage/kv/namespaces/${NS_ID}/keys?limit=1000") || return 0
+    KV_MD5_MAP=$(echo "$list" | python3 -c '
+import json, sys
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for k in (r or []):
+    md5 = (k.get("metadata") or {}).get("md5", "")
+    if md5:
+        name = k.get("name", "")
+        print(name + "\t" + md5)
+')
+}
+kv_remote_md5() {  # key → echo remote md5 (empty if unknown)
+    local key="$1"
+    echo "$KV_MD5_MAP" | awk -F'\t' -v k="$key" '$1 == k {print $2; exit}'
+}
+
 # ─── 3. Upload assets to KV ──────────────────────────────────────────────────
 # Map: local path → KV key. /sub and /sub.txt are aliases of the same file;
 # the Worker also aliases /sub → sub.txt, but we store both names so any
@@ -114,11 +142,18 @@ log "KV namespace: ${NS_ID}"
 put_value() { # local_file kv_key
     local file="$1" key="$2"
     [[ -f "$file" ]] || { warn "missing asset (skipping): $file"; return 0; }
-    local enc
+    local md5 remote enc meta out
+    md5=$(md5sum "$file" | awk '{print $1}')
+    remote=$(kv_remote_md5 "$key")
+    if [[ -n "$remote" && "$remote" == "$md5" ]]; then
+        log "KV: ${key} unchanged (md5 ${md5:0:8}) — skip upload"
+        return 0
+    fi
     enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$key")
+    # Store the md5 as KV metadata so the next run can skip unchanged uploads.
+    meta=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "{\"md5\":\"${md5}\"}")
     # shellcheck disable=SC2155
-    local out
-    out=$(api PUT "/accounts/${ACCOUNT_ID}/storage/kv/namespaces/${NS_ID}/values/${enc}" \
+    out=$(api PUT "/accounts/${ACCOUNT_ID}/storage/kv/namespaces/${NS_ID}/values/${enc}?metadata=${meta}" \
         --data-binary "@${file}") || return 1
     log "KV: ${key} ← $(basename "$file") ($(du -h "$file" | cut -f1))"
 }
@@ -129,6 +164,9 @@ if [[ ! -d "$SUB_DIR" ]]; then
     echo "ERROR: ${SUB_DIR} not found — run ./proxy.sh (RENDER_ONLY=1) first, or use ./update-assets.sh." >&2
     exit 1
 fi
+
+# Load remote md5 map once — every put_value below consults it for skip logic.
+kv_load_hashes
 
 put_value "${SUB_DIR}/index.html"        "index.html"
 put_value "${SUB_DIR}/panel.html"        "panel.html"

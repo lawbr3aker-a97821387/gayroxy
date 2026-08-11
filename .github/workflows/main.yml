@@ -77,6 +77,18 @@ jobs:
       - name: Make scripts executable
         run: chmod +x proxy.sh deploy-cf.sh
 
+      - name: Compute cache week (geo refreshes weekly)
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: ♻️ Cache geo databases (weekly)
+        uses: actions/cache@v4
+        with:
+          path: geo
+          key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
+          restore-keys: |
+            geo-${{ runner.os }}-
+
       - name: ⚡ Render assets (RENDER_ONLY)
         id: render
         env:
@@ -133,6 +145,33 @@ jobs:
 
       - name: Make scripts executable
         run: chmod +x proxy.sh deploy-cf.sh .github/retrigger.sh
+
+      - name: Compute cache week (geo refreshes weekly)
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: ♻️ Cache geo databases (weekly)
+        uses: actions/cache@v4
+        with:
+          path: geo
+          key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
+          restore-keys: |
+            geo-${{ runner.os }}-
+
+      - name: Get latest xray version (cache key)
+        id: xrayver
+        run: |
+          tag=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+            | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1)
+          echo "tag=${tag:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: ♻️ Cache xray binary (per release)
+        uses: actions/cache@v4
+        with:
+          path: xray
+          key: xray-${{ runner.os }}-${{ steps.xrayver.outputs.tag }}
+          restore-keys: |
+            xray-${{ runner.os }}-
 
       - name: ▶️ Run proxy (long-lived tunnel)
         id: proxy

@@ -1,0 +1,73 @@
+name: Keepalive Watchdog
+
+# ─── Self-healing watchdog (S2) ─────────────────────────────────────────────
+# Restores the old version's "start the process, make sure it becomes
+# in_progress and xray started; if not, close it and retry until 100% ok"
+# behavior — WITHOUT the dispatch storm.
+#
+# Why a separate workflow: with concurrency cancel-in-progress on the main
+# workflow, the old run dies the instant a successor is dispatched, so the
+# successor can't be verified from inside the old run. Instead:
+#   1. The NEW run verifies its OWN boot (boot-verify in proxy.sh) and exits
+#      non-zero on failure → its always() retrigger fires the next attempt.
+#   2. THIS workflow runs every 15 min as a last-resort net:
+#      a. Cancels any main-workflow run stuck in 'queued' > 6 min (frees the
+#         runner slot — fixes "stays in queue forever").
+#      b. If NO main-workflow run is active (queued/in_progress), dispatches
+#         a fresh one (fixes a dead chain = service down).
+#
+# Single-run policy preserved: cancel-in-progress on the main workflow means
+# a fresh dispatch can never overlap an existing in-progress run.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: gayroxy-keepalive
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Self-heal the main workflow
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WF="Build & Deploy Proxy"
+          REF="${GITHUB_REF_NAME:-master}"
+
+          # 1) Cancel runs stuck in 'queued' longer than 6 minutes.
+          #    A healthy run goes queued→in_progress in seconds once a runner
+          #    is free; >6 min means the queue is wedged (zombie runner, etc.).
+          stuck=$(gh run list --workflow "$WF" --branch "$REF" --limit 20 \
+            --json databaseId,status,updatedAt --jq \
+            '.[] | select(.status == "queued") |
+             select((now - (.updatedAt | fromdateiso8601)) > 360) | .databaseId' \
+            2>/dev/null || true)
+          for id in $stuck; do
+            echo "⚠️ Run #$id stuck in 'queued' >6min — cancelling to free the slot."
+            gh run cancel "$id" 2>&1 || true
+          done
+
+          # 2) Ensure at least one run is active (queued or in_progress).
+          active=$(gh run list --workflow "$WF" --branch "$REF" --limit 20 \
+            --json status --jq '[.[] | select(.status != "completed")] | length' \
+            2>/dev/null || echo 0)
+          if (( active > 0 )); then
+            echo "✅ $WF already active ($active run(s)) — nothing to do."
+            exit 0
+          fi
+
+          # 3) Chain is dead — dispatch a fresh run to restore service.
+          echo "⚠️ No active run of '$WF' — dispatching to restore the proxy chain."
+          gh workflow run "$WF" --ref "$REF"
+          echo "Dispatched."
