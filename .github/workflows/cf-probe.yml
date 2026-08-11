@@ -1,0 +1,80 @@
+name: CF Permissions Probe
+# TEMPORARY — probes what secrets.CF_TOKEN can actually do:
+#   1. verify token
+#   2. list accounts
+#   3. create a named tunnel      (needs Account·Cloudflare Tunnel:Edit)
+#   4. fetch a tunnel token       (needs Account·Cloudflare Tunnel:Edit)
+#   5. list zones                 (needs Zone·Zone:Read)
+#   6. create a DNS CNAME record  (needs Zone·DNS:Edit — the "custom route")
+# All created resources are deleted immediately. Never prints the token.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe CF_TOKEN capabilities
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        run: |
+          set -u
+          API="https://api.cloudflare.com/client/v4"
+          AUTH="Authorization: Bearer ${CF_TOKEN}"
+          TS=$(date +%s)
+          say() { echo "== $1"; }
+          jqgot() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('$1',''))"; }
+
+          say "1) token verify"
+          curl -s -H "$AUTH" "$API/user/tokens/verify" | jq -c '{success, status: .result.status}'
+
+          say "2) accounts (names truncated to 12 chars — private log)"
+          ACCTS=$(curl -s -H "$AUTH" "$API/accounts?per_page=5")
+          echo "$ACCTS" | jq -c '{success, count: (.result|length), names: [.result[].name | .[0:12]]}'
+          ACCT=$(echo "$ACCTS" | python3 -c "import json,sys; r=json.load(sys.stdin)['result']; print(r[0]['id'] if r else '')")
+          if [ -z "$ACCT" ]; then
+            echo "FATAL: no account access"; exit 0
+          fi
+
+          say "3) create named tunnel (probe)"
+          TUN=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"name\":\"cf-perm-probe-${TS}\",\"type\":\"cfd_tunnel\"}" \
+            "$API/accounts/$ACCT/cfd_tunnel")
+          echo "$TUN" | jq -c '{success, errors: [.errors[].message]}'
+          TID=$(echo "$TUN" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result']['id'] if d.get('result') else '')")
+
+          if [ -n "$TID" ]; then
+            say "4) fetch tunnel token"
+            curl -s -H "$AUTH" "$API/accounts/$ACCT/cfd_tunnel/$TID/token" \
+              | jq -c '{success, has_result: (.result != null)}'
+            say "cleanup: delete probe tunnel"
+            curl -s -X DELETE -H "$AUTH" "$API/accounts/$ACCT/cfd_tunnel/$TID" \
+              | jq -c '{success}'
+          else
+            echo "RESULT: cannot create tunnel → Account·Cloudflare Tunnel:Edit MISSING"
+          fi
+
+          say "5) list zones"
+          ZONES=$(curl -s -H "$AUTH" "$API/zones?per_page=5")
+          echo "$ZONES" | jq -c '{success, count: (.result|length), names: [.result[].name | .[0:12]]}'
+          ZID=$(echo "$ZONES" | python3 -c "import json,sys; r=json.load(sys.stdin)['result']; print(r[0]['id'] if r else '')")
+
+          if [ -n "$ZID" ]; then
+            say "6) create DNS CNAME (custom-route capability)"
+            DNS=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+              -d "{\"type\":\"CNAME\",\"name\":\"__cf-perm-probe-${TS}\",\"content\":\"example.com\",\"ttl\":1}" \
+              "$API/zones/$ZID/dns_records")
+            echo "$DNS" | jq -c '{success, errors: [.errors[].message]}'
+            RID=$(echo "$DNS" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result']['id'] if d.get('result') else '')")
+            if [ -n "$RID" ]; then
+              say "cleanup: delete probe DNS record"
+              curl -s -X DELETE -H "$AUTH" "$API/zones/$ZID/dns_records/$RID" | jq -c '{success}'
+            else
+              echo "RESULT: cannot create DNS CNAME → Zone·DNS:Edit MISSING"
+            fi
+          else
+            echo "RESULT: no zone access → Zone·Zone:Read MISSING (custom route impossible)"
+          fi
+
+          say "PROBE DONE"
