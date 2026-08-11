@@ -23,10 +23,12 @@ on:
 #    on ANY outcome (if: always()) so a failed/timed-out run is followed up.
 #  • Static assets (sub/panel/geo/index) are served from Cloudflare Workers+KV
 #    — deployed by deploy-cf.sh, always-on, fast, independent of the tunnel.
-#  • Tunnel: NAMED TUNNEL when CF_ROUTE + CF_TUNNEL_TOKEN are set (stable
-#    custom domain — configs never change across runs); otherwise the
-#    zero-config QUICK TUNNEL (random trycloudflare.com URL, rotated every
-#    run, published to the Worker within seconds of the tunnel booting).
+#  • Tunnel: NAMED TUNNEL when NAMED_DOMAIN + CF_TOKEN are set (stable
+#    custom domain — configs never change across runs; proxy.sh bootstraps
+#    the tunnel itself via the CF API, no separate token secret needed);
+#    otherwise the zero-config QUICK TUNNEL (random trycloudflare.com URL,
+#    rotated every run, published to the Worker within seconds of the tunnel
+#    booting).
 #
 #  TWO JOBS (proxy independent of render — the tunnel must never wait on
 #  asset publishing):
@@ -56,13 +58,15 @@ env:
   # Variables → New variable: WORKER_DOMAIN). deploy-cf.sh binds it to the
   # Worker as a Workers Custom Domain (auto-DNS + managed TLS, free plan).
   WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
-  # NAMED TUNNEL (optional — old way): stable custom domain + cloudflared
-  # tunnel token. When both are set, proxy.sh runs `cloudflared tunnel run
-  # --token` on CF_ROUTE (configs never change across runs). When either is
-  # missing, it falls back to the random quick tunnel. Legacy secrets
-  # CF_DOMAIN/CF_AUTHTOKEN are mapped here so no new secrets are needed.
-  CF_ROUTE: ${{ secrets.CF_DOMAIN }}
-  CF_TUNNEL_TOKEN: ${{ secrets.CF_AUTHTOKEN }}
+  # NAMED TUNNEL (optional): stable custom domain. When NAMED_DOMAIN + CF_TOKEN
+  # are set, proxy.sh bootstraps a named tunnel at boot via the CF API —
+  # create-or-reuse the tunnel, fetch its connection token, point the domain's
+  # DNS at it (CNAME → <tunnel-id>.cfargotunnel.com, proxied). CF_TOKEN needs
+  # Account·Cloudflare Tunnel:Edit + Zone·Zone:Read + Zone·DNS:Edit. When
+  # either is missing, it falls back to the random quick tunnel. The legacy
+  # CF_DOMAIN secret is mapped here so no new secret is needed (set NAMED_DOMAIN
+  # directly to replace it).
+  NAMED_DOMAIN: ${{ secrets.NAMED_DOMAIN || secrets.CF_DOMAIN }}
 
 jobs:
   render:

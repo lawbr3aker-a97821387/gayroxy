@@ -45,18 +45,20 @@ Go to **Settings → Secrets and variables → Actions**.
 | `CF_TOKEN` | ✅ | Cloudflare API token — **Workers Scripts:Edit**, **Workers KV Storage:Edit**, **Account Settings:Read** (see below) |
 | `GH_TOKEN` | ✅ | GitHub PAT with `repo` + `workflow` scope. Required — the auto-retrigger + keepalive dispatch the next run with it (a PAT outlives the built-in `GITHUB_TOKEN` and has higher rate limits). |
 | `EXTERNAL_SUB_URLS` | ❌ | Comma-separated external subscription URLs to merge (unset → only the 15 built-in configs) |
-| `CF_ROUTE` | ❌ | Named-tunnel mode: the stable custom domain to serve the proxy on (e.g. `proxy.example.com`). Must be paired with `CF_TUNNEL_TOKEN`. |
-| `CF_TUNNEL_TOKEN` | ❌ | Named-tunnel mode: the tunnel connection token (`cloudflared tunnel run --token`). Must be paired with `CF_ROUTE`. |
+| `NAMED_DOMAIN` | ❌ | Named-tunnel mode: the stable custom domain to serve the proxy on (e.g. `proxy.example.com`). Needs `CF_TOKEN` with `Account·Cloudflare Tunnel:Edit` + `Zone·DNS:Edit`. Legacy alias: `CF_DOMAIN` (still read if `NAMED_DOMAIN` is unset). |
 
 There are **two tunnel modes**:
 
-- **Named tunnel (recommended, stable configs):** set both `CF_ROUTE` and
-  `CF_TUNNEL_TOKEN`. The proxy runs on your own domain — the subscription
-  configs never change across runs, so users import **once** and stay valid
-  forever. Requires a Cloudflare account with a domain on it.
-- **Quick tunnel (zero-config fallback):** if either of the above is
-  unset, the proxy falls back to a free random `trycloudflare.com` URL
-  (rotated every run, published to the Worker within seconds of boot).
+- **Named tunnel (recommended, stable configs):** set `NAMED_DOMAIN` (and keep
+  `CF_TOKEN` with the tunnel + DNS permissions). The proxy runs on your own
+  domain — the subscription configs never change across runs, so users import
+  **once** and stay valid forever. `proxy.sh` bootstraps everything itself at
+  boot via the CF API: create-or-reuse the tunnel, fetch its connection token,
+  point the domain's DNS at it (CNAME, proxied). No separate tunnel token
+  secret needed. Requires a Cloudflare account with a domain on it.
+- **Quick tunnel (zero-config fallback):** if `NAMED_DOMAIN` is unset (or the
+  bootstrap fails), the proxy falls back to a free random `trycloudflare.com`
+  URL (rotated every run, published to the Worker within seconds of boot).
 
 Static assets are always served from a **Cloudflare Worker + KV** you own,
 not GitHub Pages.
@@ -68,14 +70,14 @@ not GitHub Pages.
 | Account | Workers Scripts:Edit |
 | Account | Workers KV Storage:Edit |
 | Account | Account Settings:Read |
+| Account | Cloudflare Tunnel:Edit — only for **named-tunnel mode** (lets `proxy.sh` create/reuse the tunnel + fetch its token) |
 | Zone (optional) | Workers Routes:Edit + DNS:Edit — only if you want a **custom domain** for the panel/sub (see step 3) |
 
 ```bash
 gh secret set CF_TOKEN        # paste the token
 gh secret set GH_TOKEN        # required PAT (repo + workflow scope)
-# Named-tunnel mode (optional): stable domain + tunnel token
-gh secret set CF_ROUTE
-gh secret set CF_TUNNEL_TOKEN
+# Named-tunnel mode (optional): stable custom domain (legacy alias: CF_DOMAIN)
+gh secret set NAMED_DOMAIN    # e.g. proxy.example.com
 ```
 
 ### 3. (Optional) Custom domain for the panel/sub
@@ -146,10 +148,9 @@ live tunnel URL, and re-triggers itself 24/7.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CF_TOKEN` | — | **Required.** CF API token (Workers Scripts:Edit + Workers KV Storage:Edit + Account Settings:Read). Used to deploy the Worker + KV. Also the default `SEED`. |
+| `CF_TOKEN` | — | **Required.** CF API token (Workers Scripts:Edit + Workers KV Storage:Edit + Account Settings:Read). Used to deploy the Worker + KV. Also the default `SEED`. Add `Account·Cloudflare Tunnel:Edit` + `Zone·DNS:Edit` for named-tunnel mode. |
 | `GH_TOKEN` | — | **Required.** GitHub PAT with `repo` + `workflow` scope. Used by the auto-retrigger + keepalive to dispatch the next run (a PAT outlives the built-in token and has higher rate limits). |
-| `CF_ROUTE` | — | **Optional (named tunnel).** Stable custom domain for the proxy, e.g. `proxy.example.com`. Requires `CF_TUNNEL_TOKEN`. When set, configs never change across runs. |
-| `CF_TUNNEL_TOKEN` | — | **Optional (named tunnel).** Tunnel connection token (`cloudflared tunnel run --token`). Requires `CF_ROUTE`. When either is unset → quick-tunnel fallback. |
+| `NAMED_DOMAIN` | — | **Optional (named tunnel).** Stable custom domain for the proxy, e.g. `proxy.example.com`. `proxy.sh` bootstraps the tunnel via the CF API at boot (create-or-reuse + fetch token + DNS CNAME). When set, configs never change across runs. Legacy alias: `CF_DOMAIN`. |
 | `EXTERNAL_SUB_URLS` | — (none) | Comma-separated external subscription URLs to merge into the panel. Unset → only the 15 built-in Gayroxy configs are served. |
 | `WORKER_URL` | — | **Repo variable** (`vars.WORKER_URL`) — the Cloudflare Worker URL, saved automatically by `deploy-cf.sh` after the first deploy. |
 | `WORKER_DOMAIN` | — | **Repo variable** (optional, recommended) — static custom domain for the pages, e.g. `proxy.example.com`; bound as a Workers Custom Domain (auto-DNS + managed TLS). Requires the zone on the same CF account + Zone:Read / Workers Routes:Edit / DNS:Edit. |
@@ -266,7 +267,7 @@ tunnel, during which the Cloudflare edge serves 502/522 for tunneled paths
 Three mitigations keep the gap small:
 - `RETRIGGER_LEAD_MIN` — the outgoing run dispatches its successor before the
   240-min cap, so the next runner boots while the old tunnel is still up.
-- The **named tunnel** (`CF_ROUTE`) keeps a stable hostname; the route stays
+- The **named tunnel** (`NAMED_DOMAIN`) keeps a stable hostname; the route stays
   pinned at the edge and only the origin blips during the gap.
 - Failed boots fail fast (boot-verify) so a broken run is replaced quickly
   instead of serving errors until its timeout.
