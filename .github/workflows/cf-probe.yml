@@ -37,11 +37,11 @@ jobs:
             echo "FATAL: no account access"; exit 0
           fi
 
-          say "3) create named tunnel (probe)"
+          say "3) create named tunnel (probe) — full error detail"
           TUN=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
-            -d "{\"name\":\"cf-perm-probe-${TS}\",\"type\":\"cfd_tunnel\"}" \
+            -d "{\"name\":\"cf-perm-probe-${TS}\"}" \
             "$API/accounts/$ACCT/cfd_tunnel")
-          echo "$TUN" | jq -c '{success, errors: [.errors[].message]}'
+          echo "$TUN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('success:', d.get('success')); print('errors:', json.dumps(d.get('errors', [])))"
           TID=$(echo "$TUN" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result']['id'] if d.get('result') else '')")
 
           if [ -n "$TID" ]; then
