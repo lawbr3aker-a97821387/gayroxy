@@ -23,12 +23,13 @@ on:
 #    on ANY outcome (if: always()) so a failed/timed-out run is followed up.
 #  • Static assets (sub/panel/geo/index) are served from Cloudflare Workers+KV
 #    — deployed by deploy-cf.sh, always-on, fast, independent of the tunnel.
-#  • Tunnel: NAMED TUNNEL when NAMED_DOMAIN + CF_TOKEN are set (stable
-#    custom domain — configs never change across runs; proxy.sh bootstraps
-#    the tunnel itself via the CF API, no separate token secret needed);
-#    otherwise the zero-config QUICK TUNNEL (random trycloudflare.com URL,
-#    rotated every run, published to the Worker within seconds of the tunnel
-#    booting).
+#  • Tunnel: NAMED TUNNEL when CF_TOKEN is set (stable hostname — configs
+#    never change across runs; proxy.sh does EVERYTHING at boot via the CF
+#    API: picks the first account + first active zone, derives the fixed
+#    hostname gaaayroxy.<zone>, creates-or-reuses the tunnel, points DNS at
+#    it — no domain/tunnel-token secrets needed); otherwise the zero-config
+#    QUICK TUNNEL (random trycloudflare.com URL, rotated every run, published
+#    to the Worker within seconds of the tunnel booting).
 #
 #  TWO JOBS (proxy independent of render — the tunnel must never wait on
 #  asset publishing):
@@ -58,15 +59,12 @@ env:
   # Variables → New variable: WORKER_DOMAIN). deploy-cf.sh binds it to the
   # Worker as a Workers Custom Domain (auto-DNS + managed TLS, free plan).
   WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
-  # NAMED TUNNEL (optional): stable custom domain. When NAMED_DOMAIN + CF_TOKEN
-  # are set, proxy.sh bootstraps a named tunnel at boot via the CF API —
-  # create-or-reuse the tunnel, fetch its connection token, point the domain's
-  # DNS at it (CNAME → <tunnel-id>.cfargotunnel.com, proxied). CF_TOKEN needs
-  # Account·Cloudflare Tunnel:Edit + Zone·Zone:Read + Zone·DNS:Edit. When
-  # either is missing, it falls back to the random quick tunnel. The legacy
-  # CF_DOMAIN secret is mapped here so no new secret is needed (set NAMED_DOMAIN
-  # directly to replace it).
-  NAMED_DOMAIN: ${{ secrets.NAMED_DOMAIN || secrets.CF_DOMAIN }}
+  # NAMED TUNNEL (automatic): just set the CF_TOKEN secret. proxy.sh derives
+  # everything at boot via the CF API — first account + first active zone →
+  # fixed hostname gaaayroxy.<zone>, create-or-reuse tunnel, point DNS at it
+  # (CNAME → <tunnel-id>.cfargotunnel.com, proxied). CF_TOKEN needs
+  # Account·Cloudflare Tunnel:Edit + Zone·Zone:Read + Zone·DNS:Edit. Without
+  # CF_TOKEN it falls back to the random quick tunnel. No domain secrets.
 
 jobs:
   render:
@@ -99,6 +97,10 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           RENDER_ONLY: "1"
+          # CF_TOKEN lets the RENDER_ONLY render resolve the static named
+          # hostname (gaaayroxy.<zone>) so the FIRST deploy already carries
+          # the real stable sub URL — no placeholder flash.
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
           SEED: ${{ secrets.CF_TOKEN || github.repository }}
         run: |
           mkdir -p logs

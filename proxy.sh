@@ -30,30 +30,34 @@ PORT_VMESS_HU=10016
 WARP_PORT=${WARP_PORT:-40000}
 
 # Cloudflare variables — OPTIONAL. Two tunnel modes:
-#   NAMED TUNNEL: CF_TOKEN + NAMED_DOMAIN set → proxy.sh bootstraps a named
-#                 tunnel via the CF API at boot (create-or-reuse by name),
-#                 fetches its connection token, points NAMED_DOMAIN's DNS at
-#                 it (CNAME → <tunnel-id>.cfargotunnel.com, proxied). Needs
-#                 CF_TOKEN with: Account·Cloudflare Tunnel:Edit (create tunnel
-#                 + fetch token), Zone·Zone:Read + Zone·DNS:Edit (route DNS).
-#                 Static custom domain — configs never change across runs.
-#   QUICK TUNNEL: neither set → free random trycloudflare.com URL,
+#   NAMED TUNNEL: CF_TOKEN set → proxy.sh does EVERYTHING at boot via the CF
+#                 API — no domain/tunnel-token secrets needed:
+#                   1. account  = first account on the token
+#                   2. zone     = first active zone (sorted by name)
+#                   3. hostname = ${TUNNEL_NAME}.<zone>  (fixed: gaaayroxy.<zone>)
+#                   4. create-or-reuse tunnel '${TUNNEL_NAME}', fetch its
+#                      connection token
+#                   5. point the hostname's DNS at it (CNAME → <tunnel-id>
+#                      .cfargotunnel.com, proxied) — idempotent
+#                 Static hostname — configs never change across runs.
+#                 Needs CF_TOKEN with: Account·Cloudflare Tunnel:Edit (create
+#                 tunnel + fetch token), Zone·Zone:Read + Zone·DNS:Edit.
+#   QUICK TUNNEL: CF_TOKEN unset → free random trycloudflare.com URL,
 #                 zero requirements (no account, no token, no domain).
 CF_TOKEN="${CF_TOKEN:-}"
-NAMED_DOMAIN="${NAMED_DOMAIN:-}"
+TUNNEL_NAME="gaaayroxy"   # fixed named-tunnel name → hostname ${TUNNEL_NAME}.<zone>
 # TUNNEL_DOMAIN (internal): the LIVE domain actually serving this run — the
-# named domain, or the random quick-tunnel URL. Also accepted as env input by
-# the quick-tunnel re-deploy step (RENDER_ONLY) to render the sub with the
-# last-known live URL until the proxy job overwrites it.
+# named hostname, or the random quick-tunnel URL. Also accepted as env input
+# by the render job to render the sub with a known URL before the proxy boots.
 TUNNEL_DOMAIN="${TUNNEL_DOMAIN:-}"
 
 # Cloudflare Worker URL for always-on static assets (sub/panel/geo served
 # from Workers KV — the "Pages replacement"). e.g. https://gayroxy.<acct>.workers.dev
 # Set by the workflow (repo variable WORKER_URL, written by deploy-cf.sh after
 # the first deploy). Optional: when unset, the tunnel domain is the fallback and
-# the quick-tunnel re-deploy step publishes the live URL a few minutes later.
+# the render job publishes the live URL a few minutes later.
 # Trailing slash stripped so joins like ${WORKER_URL}/sub.txt don't double-slash.
-WORKER_URL="${WORKER_URL:-${PAGES_URL:-${NAMED_DOMAIN:+https://${NAMED_DOMAIN}}}}"
+WORKER_URL="${WORKER_URL:-${PAGES_URL:-}}"
 WORKER_URL="${WORKER_URL%/}"
 
 # Seed for deterministic credentials — same seed = same UUIDs/passwords every run
@@ -103,7 +107,8 @@ warn()  { echo -e "${YEL}[proxy.sh] WARNING${NC} $1"; }
 error() { echo -e "${RED}[proxy.sh] ERROR${NC} $1"; }
 
 help_msg() { cat <<'EOF'
-Usage: CF_TOKEN=xxx NAMED_DOMAIN=proxy.example.com ./proxy.sh
+Usage: CF_TOKEN=xxx ./proxy.sh          # named tunnel (auto: gaaayroxy.<zone>)
+       ./proxy.sh                       # quick tunnel (random trycloudflare URL)
 EOF
 }
 for arg in "$@"; do case "$arg" in -h|--help) help_msg; exit 0;; esac; done
@@ -468,10 +473,108 @@ envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 # Respect an externally-supplied TUNNEL_DOMAIN (the quick-tunnel re-deploy step
 # passes the live URL this way). Only clear it when we're about to start our own
 # tunnel (non-RENDER_ONLY); in RENDER_ONLY a pre-set value is the source of truth.
+
+# ─── CF API helpers (defined OUTSIDE the RENDER_ONLY guard: the DOMAIN
+# resolution block below is shared by both modes and calls resolve_named_host
+# in RENDER_ONLY too, so the first render already carries the static hostname) ─
+
+# Resolve the static named hostname from the CF account (no manual config).
+# With only CF_TOKEN, derive: account = first account on the token, zone = first
+# active zone (sorted by name — deterministic), hostname = ${TUNNEL_NAME}.<zone>.
+# Sets TUNNEL_DOMAIN + TUNNEL_ACCT_ID + TUNNEL_ZONE_ID on success (the IDs are
+# reused by bootstrap_named_tunnel so no second lookup). Returns 0 (ok) or
+# 1 (fail → caller falls back to quick tunnel).
+resolve_named_host() {
+    local api="https://api.cloudflare.com/client/v4"
+    local auth="Authorization: Bearer ${CF_TOKEN}"
+    TUNNEL_DOMAIN=""
+    TUNNEL_ACCT_ID=""
+    TUNNEL_ZONE_ID=""
+
+    # 1. First account (Account Settings:Read)
+    TUNNEL_ACCT_ID=$(curl -sf --max-time 15 -H "$auth" "$api/accounts?per_page=1" \
+        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || return 1
+    [[ -n "$TUNNEL_ACCT_ID" ]] || { warn "CF API: no account found (token lacks Account Settings:Read?)"; return 1; }
+
+    # 2. First active zone by name (Zone:Read) — name + id in one call
+    local zone_name
+    read -r zone_name TUNNEL_ZONE_ID < <(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" \
+        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print((r[0]["name"]+" "+r[0]["id"]) if r else "")') || true
+    if [[ -z "$zone_name" || -z "$TUNNEL_ZONE_ID" ]]; then
+        warn "CF API: no active zone found (add a domain to Cloudflare + Zone:Read)"
+        return 1
+    fi
+
+    TUNNEL_DOMAIN="${TUNNEL_NAME}.${zone_name}"
+    log "Named hostname: ${TUNNEL_DOMAIN} (zone: ${zone_name})"
+    return 0
+}
+
+# ─── Bootstrap named tunnel via CF API (CF_TOKEN only — no secrets) ───────
+# Creates-or-reuses a tunnel named ${TUNNEL_NAME} and points TUNNEL_DOMAIN's
+# DNS at it (CNAME → <tunnel-id>.cfargotunnel.com, proxied), all at boot time.
+# Requires:
+#   Account · Cloudflare Tunnel:Edit   (create tunnel + fetch token)
+#   Zone    · Zone:Read + DNS:Edit     (find zone + create CNAME route)
+# Precondition: resolve_named_host ran and set TUNNEL_DOMAIN/TUNNEL_ACCT_ID/
+# TUNNEL_ZONE_ID. Returns 0 (ok) or 1 (fail → caller falls back to quick tunnel).
+bootstrap_named_tunnel() {
+    local api="https://api.cloudflare.com/client/v4"
+    local auth="Authorization: Bearer ${CF_TOKEN}"
+    local tunnel_id rec_id content tname
+
+    log "Bootstrapping named tunnel '${TUNNEL_NAME}' for ${TUNNEL_DOMAIN} (CF API)..."
+    tname="${TUNNEL_NAME}"   # fixed name → same tunnel every run (max 38 chars)
+
+    # 1. Find-or-create the tunnel (Cloudflare Tunnel:Edit)
+    tunnel_id=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${TUNNEL_ACCT_ID}/cfd_tunnel?name=${tname}" \
+        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || true
+    if [[ -z "$tunnel_id" ]]; then
+        log "Creating tunnel '${tname}'..."
+        tunnel_id=$(curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
+            -d "{\"name\":\"${tname}\"}" "$api/accounts/${TUNNEL_ACCT_ID}/cfd_tunnel" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("id","") if d.get("success") else "")') || true
+        [[ -n "$tunnel_id" ]] || { warn "CF API: tunnel create failed (token lacks Cloudflare Tunnel:Edit?)"; return 1; }
+    fi
+    log "Named tunnel: ${tname} (${tunnel_id})"
+
+    # 2. Fetch the tunnel connection token (Cloudflare Tunnel:Edit)
+    TUNNEL_TOKEN=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${TUNNEL_ACCT_ID}/cfd_tunnel/${tunnel_id}/token" \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("token","") if d.get("success") else "")') || true
+    [[ -n "$TUNNEL_TOKEN" ]] || { warn "CF API: token fetch failed (token lacks Cloudflare Tunnel:Edit?)"; return 1; }
+
+    # 3. DNS route: CNAME TUNNEL_DOMAIN → <tunnel-id>.cfargotunnel.com (proxied)
+    #    (Zone:Read + DNS:Edit). Idempotent: reuse existing record if present.
+    content="${tunnel_id}.cfargotunnel.com"
+    rec_id=$(curl -sf --max-time 15 -H "$auth" "$api/zones/${TUNNEL_ZONE_ID}/dns_records?name=${TUNNEL_DOMAIN}&type=CNAME&per_page=1" \
+        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || true
+    if [[ -n "$rec_id" ]]; then
+        curl -sf --max-time 15 -X PATCH -H "$auth" -H "Content-Type: application/json" \
+            -d "{\"content\":\"${content}\",\"proxied\":true}" \
+            "$api/zones/${TUNNEL_ZONE_ID}/dns_records/${rec_id}" >/dev/null 2>&1 \
+            && log "DNS route updated: ${TUNNEL_DOMAIN} → ${content}" \
+            || { warn "CF API: DNS record update failed (token lacks DNS:Edit?)"; return 1; }
+    else
+        curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
+            -d "{\"type\":\"CNAME\",\"name\":\"${TUNNEL_DOMAIN}\",\"content\":\"${content}\",\"proxied\":true,\"ttl\":1}" \
+            "$api/zones/${TUNNEL_ZONE_ID}/dns_records" >/dev/null 2>&1 \
+            && log "DNS route created: ${TUNNEL_DOMAIN} → ${content}" \
+            || { warn "CF API: DNS record create failed (token lacks DNS:Edit?)"; return 1; }
+    fi
+
+    return 0
+}
+
 if [[ "$RENDER_ONLY" == "1" ]]; then
     : "${TUNNEL_DOMAIN:=}"
 else
     TUNNEL_DOMAIN=""
+    # Named mode: resolve the static hostname EARLY (read-only account+zone
+    # lookups) so the handover lock below can probe it. On failure (no CF_TOKEN
+    # or no zone) TUNNEL_DOMAIN stays empty → quick-tunnel fallback later.
+    if [[ -n "$CF_TOKEN" ]]; then
+        resolve_named_host || TUNNEL_DOMAIN=""
+    fi
 
 # ─── Start xray first ────────────────────────────────────────────────────────
 log "Starting Xray-core..."
@@ -515,9 +618,9 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
 # into thinking a dead tunnel was alive (chain died silently). We probe /sub
 # which nginx always serves while the proxy runs.
 tunnel_alive() {
-    curl -sf -o /dev/null --max-time 8 "https://${NAMED_DOMAIN}/sub" 2>/dev/null
+    curl -sf -o /dev/null --max-time 8 "https://${TUNNEL_DOMAIN}/sub" 2>/dev/null
 }
-if [[ "$AUTO_RETRIGGER" == "1" && -n "$NAMED_DOMAIN" ]]; then
+if [[ "$AUTO_RETRIGGER" == "1" && -n "$TUNNEL_DOMAIN" ]]; then
     lock_attempts=0
     lock_max=$(( (RETRIGGER_LEAD_MIN + 3) * 60 / 10 ))   # ~11 min at 10s ticks
     while (( lock_attempts < lock_max )); do
@@ -534,83 +637,12 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "$NAMED_DOMAIN" ]]; then
     fi
 fi
 
-# ─── Bootstrap named tunnel via CF API (no CF_TUNNEL_TOKEN secret needed) ──
-# With CF_TOKEN + NAMED_DOMAIN set, create-or-reuse a named tunnel and point
-# the domain's DNS at it, all at boot time. Requires:
-#   Account · Cloudflare Tunnel:Edit   (create tunnel + fetch token)
-#   Zone    · Zone:Read + DNS:Edit     (find zone + create CNAME route)
-# Sets TUNNEL_DOMAIN="$NAMED_DOMAIN" on success. Returns 0 (ok) or 1 (fail →
-# caller falls back to the quick tunnel).
-bootstrap_named_tunnel() {
-    local api="https://api.cloudflare.com/client/v4"
-    local auth="Authorization: Bearer ${CF_TOKEN}"
-    local acct tunnel_id zone_id rec_id content tname
-
-    log "Bootstrapping named tunnel for ${NAMED_DOMAIN} (CF API)..."
-    # 1. Find the account (Account Settings:Read)
-    acct=$(curl -sf --max-time 15 -H "$auth" "$api/accounts?per_page=1" \
-        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || return 1
-    [[ -n "$acct" ]] || { warn "CF API: no account found (token lacks Account Settings:Read?)"; return 1; }
-
-    # 2. Deterministic tunnel name from the domain → same tunnel every run.
-    #    Cloudflare names cap at 38 chars (alphanumeric + dash + underscore).
-    tname="gayroxy-$(echo "$NAMED_DOMAIN" | tr '.' '-')"
-    tname="${tname:0:38}"
-    tunnel_id=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${acct}/cfd_tunnel?name=${tname}" \
-        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || true
-    if [[ -z "$tunnel_id" ]]; then
-        log "Creating tunnel '${tname}'..."
-        tunnel_id=$(curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
-            -d "{\"name\":\"${tname}\"}" "$api/accounts/${acct}/cfd_tunnel" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("id","") if d.get("success") else "")') || true
-        [[ -n "$tunnel_id" ]] || { warn "CF API: tunnel create failed (token lacks Cloudflare Tunnel:Edit?)"; return 1; }
-    fi
-    log "Named tunnel: ${tname} (${tunnel_id})"
-
-    # 3. Fetch the tunnel connection token (Cloudflare Tunnel:Edit)
-    TUNNEL_TOKEN=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${acct}/cfd_tunnel/${tunnel_id}/token" \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("token","") if d.get("success") else "")') || true
-    [[ -n "$TUNNEL_TOKEN" ]] || { warn "CF API: token fetch failed (token lacks Cloudflare Tunnel:Edit?)"; return 1; }
-
-    # 4. DNS route: CNAME NAMED_DOMAIN → <tunnel-id>.cfargotunnel.com (proxied)
-    #    (Zone:Read + DNS:Edit). Idempotent: reuse existing record if present.
-    #    Find the zone by walking up the domain labels (a.b.example.com → example.com).
-    zone_id=""
-    local zone_candidate="$NAMED_DOMAIN"
-    while [[ "$zone_candidate" == *.* ]]; do
-        zone_id=$(curl -sf --max-time 15 -H "$auth" "$api/zones?name=${zone_candidate}&per_page=1" \
-            | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || true
-        [[ -n "$zone_id" ]] && break
-        zone_candidate="${zone_candidate#*.}"
-    done
-    [[ -n "$zone_id" ]] || { warn "CF API: no zone found for '${NAMED_DOMAIN}' (add it to Cloudflare + Zone:Read)"; return 1; }
-
-    content="${tunnel_id}.cfargotunnel.com"
-    rec_id=$(curl -sf --max-time 15 -H "$auth" "$api/zones/${zone_id}/dns_records?name=${NAMED_DOMAIN}&type=CNAME&per_page=1" \
-        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || true
-    if [[ -n "$rec_id" ]]; then
-        curl -sf --max-time 15 -X PATCH -H "$auth" -H "Content-Type: application/json" \
-            -d "{\"content\":\"${content}\",\"proxied\":true}" \
-            "$api/zones/${zone_id}/dns_records/${rec_id}" >/dev/null 2>&1 \
-            && log "DNS route updated: ${NAMED_DOMAIN} → ${content}" \
-            || { warn "CF API: DNS record update failed (token lacks DNS:Edit?)"; return 1; }
-    else
-        curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
-            -d "{\"type\":\"CNAME\",\"name\":\"${NAMED_DOMAIN}\",\"content\":\"${content}\",\"proxied\":true,\"ttl\":1}" \
-            "$api/zones/${zone_id}/dns_records" >/dev/null 2>&1 \
-            && log "DNS route created: ${NAMED_DOMAIN} → ${content}" \
-            || { warn "CF API: DNS record create failed (token lacks DNS:Edit?)"; return 1; }
-    fi
-
-    TUNNEL_DOMAIN="$NAMED_DOMAIN"
-    return 0
-}
-
 # ─── Start Cloudflare Tunnel ────────────────────────────────────────────────
 CLOUDFLARED_LOG="${LOG_DIR}/cloudflared.log"
-TUNNEL_DOMAIN=""
-if [[ -n "$CF_TOKEN" && -n "$NAMED_DOMAIN" ]]; then
-    # NAMED TUNNEL — self-service bootstrap via CF API (CF_TOKEN only).
+if [[ -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" ]]; then
+    # NAMED TUNNEL — fully automatic via CF API (CF_TOKEN only). The static
+    # hostname was already resolved above (handover lock uses it); now create-
+    # or-reuse the tunnel and point DNS at it.
     if bootstrap_named_tunnel; then
         "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "${TUNNEL_TOKEN}" --url "http://127.0.0.1:${PORT_NGINX}" >"${CLOUDFLARED_LOG}" 2>&1 &
         CLOUDFLARED_PID=$!
@@ -635,7 +667,7 @@ if [[ -n "$CF_TOKEN" && -n "$NAMED_DOMAIN" ]]; then
             tail -n 30 "${CLOUDFLARED_LOG}" || true
             exit 1
         fi
-        log "Cloudflare tunnel established for domain: ${NAMED_DOMAIN}"
+        log "Cloudflare tunnel established for domain: ${TUNNEL_DOMAIN}"
     else
         warn "Named-tunnel bootstrap failed — falling back to quick tunnel."
         TUNNEL_DOMAIN=""
@@ -670,16 +702,18 @@ fi   # end RENDER_ONLY guard (services block)
 
 # ─── Build subscription URLs ──────────────────────────────────────────────────
 # Live tunnel (proxy job) → use its domain. Named-tunnel RENDER_ONLY → the
-# stable custom domain. Quick-tunnel RENDER_ONLY → no tunnel in this job:
-# reuse the last known URL from the deployed sub (retrigger chains), else a
-# placeholder — the proxy job re-deploys Pages with the real URL ~2 min after
-# its tunnel boots.
+# static hostname resolved from the CF account (CF_TOKEN present in the render
+# job too, so the FIRST deploy already carries the real static domain — no
+# placeholder flash). Quick-tunnel RENDER_ONLY → no tunnel and no CF_TOKEN in
+# this job: reuse the last known URL from the deployed sub (retrigger chains),
+# else a placeholder — the proxy job re-deploys Pages with the real URL ~2 min
+# after its tunnel boots.
 if [[ -n "$TUNNEL_DOMAIN" ]]; then
     DOMAIN="$TUNNEL_DOMAIN"
-elif [[ -n "$NAMED_DOMAIN" ]]; then
+elif [[ -n "$CF_TOKEN" ]] && resolve_named_host; then
     # Named-tunnel RENDER_ONLY job: no tunnel starts here, but the sub must
-    # use the stable custom domain (same as the proxy job will).
-    DOMAIN="$NAMED_DOMAIN"
+    # use the stable static hostname (same as the proxy job will).
+    DOMAIN="$TUNNEL_DOMAIN"
 else
     DOMAIN=$(curl -sL --max-time 8 "${WORKER_URL}/sub.txt" 2>/dev/null | base64 -d 2>/dev/null | grep -oP '(?<=@)[^:]+' | head -1 || true)
     DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
