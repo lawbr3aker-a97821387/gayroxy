@@ -27,27 +27,31 @@ jobs:
           set -u
           api="https://api.cloudflare.com/client/v4"
           auth="Authorization: Bearer ${CF_TOKEN}"
-          j() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("id","") if d.get("success") else "")'; }
+          # list_id: result is a list → first item's id (like proxy.sh)
+          list_id() { python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")'; }
+          # dict_id: result is an object → its id
+          dict_id() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("id","") if d.get("success") else "")'; }
+          # list_name: result is a list → first item's name
+          list_name() { python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["name"] if r else "")'; }
 
           echo "── STEP 1: list first account (Account Settings:Read) ──"
-          ACCT=$(curl -sf --max-time 15 -H "$auth" "$api/accounts?per_page=1" | j)
+          ACCT=$(curl -sf --max-time 15 -H "$auth" "$api/accounts?per_page=1" | list_id)
           echo "account_id=${ACCT:-<FAIL>}"
           [ -n "$ACCT" ] || { echo "RESULT: FAIL at step 1"; exit 0; }
 
           echo "── STEP 2: list first active zone by name (Zone:Read) ──"
-          ZONE_NAME=$(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" \
-            | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["name"] if r else "")')
-          ZONE_ID=$(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" | j)
+          ZONE_NAME=$(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" | list_name)
+          ZONE_ID=$(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" | list_id)
           echo "zone_name=${ZONE_NAME:-<FAIL>}"
           echo "zone_id=${ZONE_ID:-<FAIL>}"
           [ -n "$ZONE_ID" ] || { echo "RESULT: FAIL at step 2"; exit 0; }
 
           echo "── STEP 3: find-or-create tunnel 'gaaayroxy' (Cloudflare Tunnel:Edit) ──"
-          TID=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel?name=gaaayroxy" | j)
+          TID=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel?name=gaaayroxy" | list_id)
           if [ -z "$TID" ]; then
             echo "tunnel not found → attempting create..."
             TID=$(curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
-              -d '{"name":"gaaayroxy"}' "$api/accounts/${ACCT}/cfd_tunnel" | j)
+              -d '{"name":"gaaayroxy"}' "$api/accounts/${ACCT}/cfd_tunnel" | dict_id)
           fi
           echo "tunnel_id=${TID:-<FAIL>}"
           [ -n "$TID" ] || { echo "RESULT: FAIL at step 3 (tunnel create)"; exit 0; }
