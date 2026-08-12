@@ -488,7 +488,7 @@ envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 # 1 (fail → caller falls back to quick tunnel).
 resolve_named_host() {
     local api="https://api.cloudflare.com/client/v4"
-    local auth="Authorization: Bearer ***"
+    local auth="Authorization: Bearer ${CF_TOKEN}"
     TUNNEL_DOMAIN=""
     TUNNEL_ACCT_ID=""
     TUNNEL_ZONE_ID=""
