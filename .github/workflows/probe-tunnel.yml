@@ -1,0 +1,36 @@
+name: Named Tunnel Probe
+
+# TEMPORARY verification: boots the REAL proxy.sh (named-tunnel path) with
+# LIVE_DEPLOY=0 so it never touches the live worker sub. The boot-verify
+# step (curl https://gaaayroxy.ai-masters.ir/sub) proves the whole chain:
+# resolve → bootstrap (token fetch w/ fixed parser) → cloudflared registers
+# → DNS CNAME serves. Deleted after use.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gayroxy-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Boot proxy (named tunnel, no live deploy)
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          LIVE_DEPLOY: "0"
+          SEED: "probe-seed"
+        run: |
+          set -o pipefail
+          ./proxy.sh 2>&1 | tee probe.log
+          echo "PROBE_EXIT=$?"
