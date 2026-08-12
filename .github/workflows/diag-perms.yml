@@ -57,8 +57,12 @@ jobs:
           [ -n "$TID" ] || { echo "RESULT: FAIL at step 3 (tunnel create)"; exit 0; }
 
           echo "── STEP 4: fetch tunnel token (Cloudflare Tunnel:Edit) ──"
-          TOK=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel/${TID}/token" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("token","") if d.get("success") else "")')
+          # Capture raw status + body (do NOT print the token if present)
+          curl -s --max-time 15 -o /tmp/tok_body.json -w "http_code=%{http_code}\n" \
+            -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel/${TID}/token" > /tmp/tok_http.txt
+          cat /tmp/tok_http.txt
+          echo "body_head=$(head -c 200 /tmp/tok_body.json)"
+          TOK=$(python3 -c 'import json,sys; d=json.load(open("/tmp/tok_body.json")); print(d.get("result",{}).get("token","") if d.get("success") else "")' 2>/dev/null || echo "")
           echo "token_fetched=$([ -n "$TOK" ] && echo yes || echo '<FAIL>')"
           [ -n "$TOK" ] || { echo "RESULT: FAIL at step 4 (token fetch)"; exit 0; }
 
