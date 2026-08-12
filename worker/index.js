@@ -33,6 +33,7 @@ function resolveKey(pathname) {
   if (p === '/') return 'index.html';
   const key = p.replace(/^\/+/, '');
   if (key === 'sub') return 'sub.txt';
+  if (key === 'sub.b64' || key === 'subscription.b64') return 'subscription.b64';
   if (key === 'panel') return 'panel.html';
   return key;
 }

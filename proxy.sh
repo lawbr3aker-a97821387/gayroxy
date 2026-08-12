@@ -481,12 +481,14 @@ envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 # Resolve the static named hostname from the CF account (no manual config).
 # With only CF_TOKEN, derive: account = first account on the token, zone = first
 # active zone (sorted by name — deterministic), hostname = ${TUNNEL_NAME}.<zone>.
+# Optionally pin the zone with TUNNEL_ZONE=example.com (set by deploy.sh from the
+# user's chosen domain) — that zone is used instead of the first-by-name default.
 # Sets TUNNEL_DOMAIN + TUNNEL_ACCT_ID + TUNNEL_ZONE_ID on success (the IDs are
 # reused by bootstrap_named_tunnel so no second lookup). Returns 0 (ok) or
 # 1 (fail → caller falls back to quick tunnel).
 resolve_named_host() {
     local api="https://api.cloudflare.com/client/v4"
-    local auth="Authorization: Bearer ${CF_TOKEN}"
+    local auth="Authorization: Bearer ***"
     TUNNEL_DOMAIN=""
     TUNNEL_ACCT_ID=""
     TUNNEL_ZONE_ID=""
@@ -496,10 +498,20 @@ resolve_named_host() {
         | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["id"] if r else "")') || return 1
     [[ -n "$TUNNEL_ACCT_ID" ]] || { warn "CF API: no account found (token lacks Account Settings:Read?)"; return 1; }
 
-    # 2. First active zone by name (Zone:Read) — name + id in one call
+    # 2. Active zone: TUNNEL_ZONE (exact name, if set) or first active by name.
     local zone_name
-    read -r zone_name TUNNEL_ZONE_ID < <(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" \
-        | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print((r[0]["name"]+" "+r[0]["id"]) if r else "")') || true
+    if [[ -n "${TUNNEL_ZONE:-}" ]]; then
+        read -r zone_name TUNNEL_ZONE_ID < <(curl -sf --max-time 15 -H "$auth" "$api/zones?name=${TUNNEL_ZONE}&status=active&per_page=1" \
+            | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print((r[0]["name"]+" "+r[0]["id"]) if r else "")') || true
+        if [[ -z "$zone_name" || -z "$TUNNEL_ZONE_ID" ]]; then
+            warn "CF API: TUNNEL_ZONE='${TUNNEL_ZONE}' not found or not active on this token — falling back to first active zone."
+            zone_name=""
+        fi
+    fi
+    if [[ -z "$zone_name" ]]; then
+        read -r zone_name TUNNEL_ZONE_ID < <(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" \
+            | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print((r[0]["name"]+" "+r[0]["id"]) if r else "")') || true
+    fi
     if [[ -z "$zone_name" || -z "$TUNNEL_ZONE_ID" ]]; then
         warn "CF API: no active zone found (add a domain to Cloudflare + Zone:Read)"
         return 1

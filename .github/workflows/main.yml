@@ -101,6 +101,9 @@ jobs:
           # hostname (gaaayroxy.<zone>) so the FIRST deploy already carries
           # the real stable sub URL — no placeholder flash.
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          # TUNNEL_ZONE pins the named tunnel to a specific zone (set by deploy.sh).
+          # Falls back to first active zone alphabetically if not set.
+          TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE }}
           SEED: ${{ secrets.CF_TOKEN || github.repository }}
         run: |
           mkdir -p logs
@@ -189,6 +192,9 @@ jobs:
           # LIVE_DEPLOY pushes the live-tunnel sub to Cloudflare KV at boot,
           # so the proxy job needs the CF token too (not just the render job).
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          # TUNNEL_ZONE pins the named tunnel to a specific zone (set by deploy.sh).
+          # Falls back to first active zone alphabetically if not set.
+          TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE }}
           # PAT is required (outlives the built-in token, higher rate limits).
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SEED: ${{ secrets.CF_TOKEN || github.repository }}
