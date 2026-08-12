@@ -61,8 +61,11 @@ jobs:
           curl -s --max-time 15 -o /tmp/tok_body.json -w "http_code=%{http_code}\n" \
             -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel/${TID}/token" > /tmp/tok_http.txt
           cat /tmp/tok_http.txt
-          echo "body_head=$(head -c 200 /tmp/tok_body.json)"
-          TOK=$(python3 -c 'import json,sys; d=json.load(open("/tmp/tok_body.json")); print(d.get("result",{}).get("token","") if d.get("success") else "")' 2>/dev/null || echo "")
+          # Only print whether the body shape is string-vs-object, never the value
+          SHAPE=$(python3 -c 'import json; d=json.load(open("/tmp/tok_body.json")); r=d.get("result"); print("string" if isinstance(r,str) else ("object" if isinstance(r,dict) else "other"))' 2>/dev/null || echo "unparseable")
+          echo "result_shape=$SHAPE"
+          echo "success=$(python3 -c 'import json; print(json.load(open("/tmp/tok_body.json")).get("success","?"))' 2>/dev/null)"
+          TOK=$(python3 -c 'import json,sys; d=json.load(open("/tmp/tok_body.json")); r=d.get("result") if d.get("success") else None; print(r if isinstance(r,str) else (r.get("token","") if isinstance(r,dict) else ""))' 2>/dev/null || echo "")
           echo "token_fetched=$([ -n "$TOK" ] && echo yes || echo '<FAIL>')"
           [ -n "$TOK" ] || { echo "RESULT: FAIL at step 4 (token fetch)"; exit 0; }
 

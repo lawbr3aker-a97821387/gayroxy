@@ -538,9 +538,15 @@ bootstrap_named_tunnel() {
     fi
     log "Named tunnel: ${tname} (${tunnel_id})"
 
-    # 2. Fetch the tunnel connection token (Cloudflare Tunnel:Edit)
+    # 2. Fetch the tunnel connection token (Cloudflare Tunnel:Edit).
+    #    NOTE: the API returns the token as a STRING in `result`
+    #    ("result": "eyJhIj..." — a JWT), NOT as result.token. Handle both
+    #    shapes so a plain string isn't mistaken for a permission failure.
     TUNNEL_TOKEN=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${TUNNEL_ACCT_ID}/cfd_tunnel/${tunnel_id}/token" \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("token","") if d.get("success") else "")') || true
+        | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("result") if d.get("success") else None
+print(r if isinstance(r,str) else (r.get("token","") if isinstance(r,dict) else ""))') || true
     [[ -n "$TUNNEL_TOKEN" ]] || { warn "CF API: token fetch failed (token lacks Cloudflare Tunnel:Edit?)"; return 1; }
 
     # 3. DNS route: CNAME TUNNEL_DOMAIN → <tunnel-id>.cfargotunnel.com (proxied)
