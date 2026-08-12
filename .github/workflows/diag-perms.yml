@@ -1,0 +1,68 @@
+name: CF Permissions Diagnostic
+
+# TEMPORARY diagnostic — verifies which Cloudflare API calls the repo's
+# CF_TOKEN secret can perform, step by step. Deleted after use.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gayroxy-diag
+  cancel-in-progress: false
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Probe CF API permissions
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        run: |
+          set -u
+          api="https://api.cloudflare.com/client/v4"
+          auth="Authorization: Bearer ${CF_TOKEN}"
+          j() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("id","") if d.get("success") else "")'; }
+
+          echo "── STEP 1: list first account (Account Settings:Read) ──"
+          ACCT=$(curl -sf --max-time 15 -H "$auth" "$api/accounts?per_page=1" | j)
+          echo "account_id=${ACCT:-<FAIL>}"
+          [ -n "$ACCT" ] || { echo "RESULT: FAIL at step 1"; exit 0; }
+
+          echo "── STEP 2: list first active zone by name (Zone:Read) ──"
+          ZONE_NAME=$(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" \
+            | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result") or []; print(r[0]["name"] if r else "")')
+          ZONE_ID=$(curl -sf --max-time 15 -H "$auth" "$api/zones?status=active&order=name&direction=asc&per_page=1" | j)
+          echo "zone_name=${ZONE_NAME:-<FAIL>}"
+          echo "zone_id=${ZONE_ID:-<FAIL>}"
+          [ -n "$ZONE_ID" ] || { echo "RESULT: FAIL at step 2"; exit 0; }
+
+          echo "── STEP 3: find-or-create tunnel 'gaaayroxy' (Cloudflare Tunnel:Edit) ──"
+          TID=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel?name=gaaayroxy" | j)
+          if [ -z "$TID" ]; then
+            echo "tunnel not found → attempting create..."
+            TID=$(curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
+              -d '{"name":"gaaayroxy"}' "$api/accounts/${ACCT}/cfd_tunnel" | j)
+          fi
+          echo "tunnel_id=${TID:-<FAIL>}"
+          [ -n "$TID" ] || { echo "RESULT: FAIL at step 3 (tunnel create)"; exit 0; }
+
+          echo "── STEP 4: fetch tunnel token (Cloudflare Tunnel:Edit) ──"
+          TOK=$(curl -sf --max-time 15 -H "$auth" "$api/accounts/${ACCT}/cfd_tunnel/${TID}/token" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",{}).get("token","") if d.get("success") else "")')
+          echo "token_fetched=$([ -n "$TOK" ] && echo yes || echo '<FAIL>')"
+          [ -n "$TOK" ] || { echo "RESULT: FAIL at step 4 (token fetch)"; exit 0; }
+
+          echo "── STEP 5: create CNAME for gaaayroxy.${ZONE_NAME} (DNS:Edit) ──"
+          HOST="gaaayroxy.${ZONE_NAME}"
+          RC=$(curl -sf --max-time 15 -X POST -H "$auth" -H "Content-Type: application/json" \
+            -d "{\"type\":\"CNAME\",\"name\":\"${HOST}\",\"content\":\"${TID}.cfargotunnel.com\",\"proxied\":true,\"ttl\":1}" \
+            "$api/zones/${ZONE_ID}/dns_records" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print("ok" if d.get("success") else d.get("errors",[{}])[0].get("message","?"))')
+          echo "dns_create=$RC"
+          echo "RESULT: $([ "$RC" = "ok" ] && echo ALL-PERMS-OK || echo "FAIL at step 5 ($RC)")"
