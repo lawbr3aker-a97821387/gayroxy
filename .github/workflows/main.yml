@@ -116,6 +116,7 @@ jobs:
         id: deploy
         env:
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
         run: |
           mkdir -p logs
           set -o pipefail
