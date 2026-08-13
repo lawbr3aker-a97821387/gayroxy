@@ -596,16 +596,38 @@ else
 
 # ─── Start xray first ────────────────────────────────────────────────────────
 log "Starting Xray-core..."
-"$XRAY_BIN" run -c "$XRAY_CONFIG_FILE" > "${LOG_DIR}/xray-output.log" 2>&1 &
-XRAY_PID=$!
+start_xray() {
+    "$XRAY_BIN" run -c "$XRAY_CONFIG_FILE" > "${LOG_DIR}/xray-output.log" 2>&1 &
+    XRAY_PID=$!
+    log "Xray running (PID: $XRAY_PID)"
+}
+start_xray
 
-sleep 1
-if ! kill -0 "$XRAY_PID" 2>/dev/null; then
-    error "Xray failed to start. Logs:"
-    tail -n 20 "${LOG_DIR}/xray-output.log" 2>/dev/null || true
-    exit 1
-fi
-log "Xray running (PID: $XRAY_PID)"
+# Xray supervisor: restart on crash (max 3 restarts, then hard exit)
+XRAY_RESTARTS=0
+MAX_XRAY_RESTARTS=3
+supervise_xray() {
+    while :; do
+        wait "$XRAY_PID" 2>/dev/null || true
+        # If we're here, Xray exited
+        if ! kill -0 "$XRAY_PID" 2>/dev/null; then
+            if (( XRAY_RESTARTS >= MAX_XRAY_RESTARTS )); then
+                error "Xray crashed ${XRAY_RESTARTS} times — giving up. Log tail:"
+                tail -n 30 "${LOG_DIR}/xray-output.log" 2>/dev/null || true
+                # Signal main to exit (will trigger re-trigger cycle)
+                kill -TERM $$ 2>/dev/null || true
+                exit 1
+            fi
+            XRAY_RESTARTS=$((XRAY_RESTARTS + 1))
+            warn "Xray crashed (restart ${XRAY_RESTARTS}/${MAX_XRAY_RESTARTS}) — restarting in 5s..."
+            sleep 5
+            start_xray
+        fi
+    done
+}
+supervise_xray &
+XRAY_SUPERVISOR_PID=$!
+log "Xray supervisor started (PID: $XRAY_SUPERVISOR_PID, max restarts: $MAX_XRAY_RESTARTS)"
 
 # ─── Start nginx ─────────────────────────────────────────────────────────────
 if ! nginx -t -c "${NGINX_CONF}" > /dev/null 2>&1; then
@@ -1046,21 +1068,22 @@ fi
 # the old "retry until 100% running" behavior — storm-safe thanks to the
 # concurrency group (at most one in-progress run at a time), and the failed
 # run's own always() step re-dispatches the next attempt.
-BOOT_VERIFY_TIMEOUT="${BOOT_VERIFY_TIMEOUT:-60}"   # seconds total
+# Increased default to 180s (3min) for cold tunnel start + DNS propagation.
+BOOT_VERIFY_TIMEOUT="${BOOT_VERIFY_TIMEOUT:-180}"   # seconds total
 log "boot-verify: checking public endpoint https://${DOMAIN}/sub (up to ${BOOT_VERIFY_TIMEOUT}s)..."
 boot_ok=0
-for ((i=1; i<=BOOT_VERIFY_TIMEOUT/5; i++)); do
+for ((i=1; i<=BOOT_VERIFY_TIMEOUT/10; i++)); do
     if ! kill -0 "$XRAY_PID" 2>/dev/null; then
         error "boot-verify: xray died during verification."
         exit 1
     fi
-    if curl -sf -o /dev/null --max-time 8 "https://${DOMAIN}/sub" 2>/dev/null; then
+    if curl -sf -o /dev/null --max-time 10 "https://${DOMAIN}/sub" 2>/dev/null; then
         boot_ok=1
         log "boot-verify: ✔ public endpoint responds (attempt ${i})"
         break
     fi
-    warn "boot-verify: endpoint not ready (attempt ${i}/$((BOOT_VERIFY_TIMEOUT/5))) — retrying..."
-    sleep 5
+    warn "boot-verify: endpoint not ready (attempt ${i}/$((BOOT_VERIFY_TIMEOUT/10))) — retrying..."
+    sleep 10
 done
 if [[ "$boot_ok" != "1" ]]; then
     error "boot-verify: public endpoint unreachable within ${BOOT_VERIFY_TIMEOUT}s — exiting to trigger retry cycle."
@@ -1108,7 +1131,7 @@ watchdog() {
             kill -TERM "$main_pid" 2>/dev/null || true
             exit 1
         fi
-        if curl -s -o /dev/null --max-time 8 -k "$endpoint" 2>/dev/null; then
+        if curl -s -o /dev/null --max-time 10 -k "$endpoint" 2>/dev/null; then
             fails=0
         else
             fails=$((fails + 1))
@@ -1128,5 +1151,6 @@ log "Running... (Ctrl-C to stop)"
 wait "$XRAY_PID"
 # Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
 wait "$WATCHDOG_PID" 2>/dev/null || true
+wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
 [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
 exit 0
