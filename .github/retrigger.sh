@@ -17,9 +17,9 @@ REF="${GITHUB_REF_NAME:-master}"
 
 # If a successor run already exists, do NOT dispatch another — the running
 # chain will handle it.
-existing=$(gh run list --workflow "$WF_NAME" --branch "$REF" \
-  --json databaseId,status --jq \
-  '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .status != "completed") | .databaseId' \
+existing=$(gh run list --branch "$REF" \
+  --json databaseId,status,workflow --jq \
+  '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .workflow == "Build & Deploy Proxy" and .status != "completed") | .databaseId' \
   2>/dev/null | head -1 || true)
 if [[ -n "$existing" ]]; then
   echo "Successor run #$existing already queued/in-progress — skipping re-trigger."

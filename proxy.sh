@@ -1100,11 +1100,13 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
     (
         sleep "$sleep_sec"
         # Skip if a successor run already exists (retrigger.sh or manual dispatch)
+        # Note: gh run list filters by file path (.git/workflows/main.yml), not
+        # workflow name (API returns "Build & Deploy <run_id>")
         WF_NAME="${GITHUB_WORKFLOW:-Build & Deploy Proxy}"
         REF="${GITHUB_REF_NAME:-master}"
-        existing=$(gh run list --workflow "$WF_NAME" --branch "$REF" \
-            --json databaseId,status --jq \
-            '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .status != "completed") | .databaseId' \
+        existing=$(gh run list --branch "$REF" \
+            --json databaseId,status,workflow --jq \
+            '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .workflow == "'"$WF_NAME"'" and .status != "completed") | .databaseId' \
             2>/dev/null | head -1)
         if [[ -n "$existing" ]]; then
             log "Auto-re-trigger: successor #$existing already running — skipping dispatch."

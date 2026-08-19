@@ -75,7 +75,7 @@ get_active_runs() {
 get_run_info() {
     local run_id="$1"
     gh api "repos/$REPO/actions/runs/$run_id" \
-        --jq '{id: .databaseId, status: .status, conclusion: .conclusion, created: .created_at, updated: .updated_at, html_url: .html_url}' \
+        --jq '{status: .status, conclusion: .conclusion, created: .created_at, updated: .updated_at, html_url: .html_url}' \
         2>/dev/null
 }
 
