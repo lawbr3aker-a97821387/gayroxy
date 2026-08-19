@@ -47,8 +47,8 @@ for cmd in gh jq curl; do
     fi
 done
 
-# Check gh auth
-if ! gh auth status &>/dev/null; then
+# Check gh auth (use --active to avoid non-active account errors)
+if ! gh auth status --active &>/dev/null; then
     error "gh not authenticated. Run: gh auth login"
     exit 1
 fi
@@ -67,7 +67,7 @@ TUNNEL_DOMAIN=$(get_tunnel_domain)
 # Get all non-completed runs for the workflow
 get_active_runs() {
     gh api "repos/$REPO/actions/runs" \
-        --jq ".workflow_runs[] | select(.workflow_name==\"$WF_NAME\" and .head_branch==\"$REF\" and .status!=\"completed\") | {id: .databaseId, status: .status, created: .created_at, html_url: .html_url}" \
+        --jq ".workflow_runs[] | select(.path==\".github/workflows/main.yml\" and .head_branch==\"$REF\" and .status!=\"completed\") | {id: .id, status: .status, created: .created_at, html_url: .html_url}" \
         2>/dev/null
 }
 
@@ -132,7 +132,7 @@ wait_for_new_run() {
     while (( $(date +%s) - start < timeout )); do
         local runs
         runs=$(gh api "repos/$REPO/actions/runs" \
-            --jq ".workflow_runs[] | select(.workflow_name==\"$WF_NAME\" and .head_branch==\"$REF\" and .created_at > \"$before_time\") | {id: .databaseId, status: .status}" 2>/dev/null | head -1)
+            --jq ".workflow_runs[] | select(.path==\".github/workflows/main.yml\" and .head_branch==\"$REF\" and .created_at > \"$before_time\") | {id: .id, status: .status}" 2>/dev/null | head -1)
         if [[ -n "$runs" ]]; then
             local run_id=$(echo "$runs" | jq -r '.id')
             local status=$(echo "$runs" | jq -r '.status')
@@ -189,7 +189,7 @@ check_stuck_runs() {
     runs_json=$(get_active_runs)
     
     if [[ -z "$runs_json" ]]; then
-        log "No active runs found"
+        log "No active runs found" >&2
         return 0
     fi
     
@@ -205,11 +205,11 @@ check_stuck_runs() {
         
         if [[ "$status" == "queued" || "$status" == "in_progress" ]]; then
             if (( age > STUCK_THRESHOLD )); then
-                warn "Run #$run_id stuck in '$status' for ${age}s (>${STUCK_THRESHOLD}s threshold)"
+                warn "Run #$run_id stuck in '$status' for ${age}s (>${STUCK_THRESHOLD}s threshold)" >&2
                 echo "$run_id"
                 stuck_count=$((stuck_count + 1))
             else
-                ok "Run #$run_id in '$status' for ${age}s (OK)"
+                ok "Run #$run_id in '$status' for ${age}s (OK)" >&2
             fi
         fi
     done
