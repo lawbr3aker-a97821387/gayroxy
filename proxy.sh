@@ -1105,8 +1105,8 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
         WF_NAME="${GITHUB_WORKFLOW:-Build & Deploy Proxy}"
         REF="${GITHUB_REF_NAME:-master}"
         existing=$(gh run list --branch "$REF" \
-            --json databaseId,status,workflow --jq \
-            '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .workflow == "'"$WF_NAME"'" and .status != "completed") | .databaseId' \
+            --json databaseId,status,workflowName --jq \
+            '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .workflowName == "'"$WF_NAME"'" and .status != "completed") | .databaseId' \
             2>/dev/null | head -1)
         if [[ -n "$existing" ]]; then
             log "Auto-re-trigger: successor #$existing already running — skipping dispatch."
