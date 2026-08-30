@@ -931,7 +931,12 @@ merge_external_subs() {
     if [[ -z "${EXTERNAL_SUB_URLS:-}" ]]; then
         EXTERNAL_SUB_URLS="$DEFAULT_EXTERNAL_SUB"
     fi
-    if [[ -n "${EXTERNAL_SUB_URLS:-}" ]]; then
+    # When HEALTH_AGENT=1, the health agent owns the external pool: it probes
+    # every config and emits only the BEST_PER_SUB best-working ones per sub.
+    # Appending the raw sub here (uncapped) would exceed that and show the user
+    # far more external configs than requested, so we skip it and leave the
+    # external section to the agent.
+    if [[ "$HEALTH_AGENT" != "1" && -n "${EXTERNAL_SUB_URLS:-}" ]]; then
         IFS=',' read -ra URLS <<< "$EXTERNAL_SUB_URLS"
         for url in "${URLS[@]}"; do
             url=$(echo "$url" | xargs)  # trim whitespace

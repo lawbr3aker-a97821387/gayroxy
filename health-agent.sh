@@ -140,10 +140,19 @@ PY
 }
 
 load_urls(){
-  printf '%s\n' "$DEFAULT_EXTERNAL_SUB"
-  [[ -n "${EXTERNAL_SUB_URLS:-}" ]] && printf '%s\n' "$EXTERNAL_SUB_URLS" | tr ',' '\n'
-  if [[ -n "$WORKER_URL" ]]; then
-    curl -fsSL --max-time 10 -H "x-gayroxy-token: $API_TOKEN" "$WORKER_URL/api/subs" 2>/dev/null | python3 -c 'import json,sys; print("\\n".join(json.load(sys.stdin).get("subs",[])))' 2>/dev/null || true
+  # Match proxy.sh semantics: the built-in DEFAULT_EXTERNAL_SUB is used ONLY
+  # when the user has not supplied their own EXTERNAL_SUB_URLS. If they have,
+  # use exactly those — otherwise the default always gets merged in on top and
+  # the user's machine ends up with far more than BEST_PER_SUB nodes per sub.
+  #
+  # The worker's /api/subs KV list is NOT consulted here. That store can hold
+  # up to MAX_SUBS=20 subs accumulated over time; pulling them all in would
+  # merge dozens of unrelated sources and blow past the BEST_PER_SUB cap per
+  # user-supplied sub. The source list is explicitly EXTERNAL_SUB_URLS only.
+  if [[ -z "${EXTERNAL_SUB_URLS:-}" ]]; then
+    printf '%s\n' "$DEFAULT_EXTERNAL_SUB"
+  else
+    printf '%s\n' "$EXTERNAL_SUB_URLS" | tr ',' '\n'
   fi
 }
 
@@ -323,16 +332,35 @@ write_merged_sub(){
   [[ -s "${SUB_DIR}/subscription.b64" ]] || return 0
   local base; base=$(base64 -d "${SUB_DIR}/subscription.b64" 2>/dev/null || true)
   [[ -n "$base" ]] || return 0
+  # Build the final public subscription: the Gayroxy-native configs from the
+  # current subscription PLUS the health agent's capped (BEST_PER_SUB/sub)
+  # external pool. Any previously-merged "External-*" links are dropped so a
+  # stale uncapped external section never leaks back in.
   python3 - "$POOL_FILE" "$base" <<'PY' > "$SUB_DIR/external-healthy.txt"
-import sys,json,urllib.parse
-p,base=sys.argv[1:]; print(base)
+import sys,json,urllib.parse,base64,re
+p,b64=sys.argv[1:]
+lines=[l for l in b64.split('\n') if l.strip()]
+def is_external(line):
+    if '#' in line:
+        frag=line.rsplit('#',1)[1]
+        if frag.startswith('External-'): return True
+    m=re.match(r'^vmess://(.+)$',line)
+    if m:
+        try:
+            d=json.loads(base64.b64decode(m.group(1)+'='*((-len(m.group(1)))%4)))
+            if str(d.get('ps','')).startswith('External-'): return True
+        except Exception: pass
+    return False
 flags=lambda c: ''.join(chr(127397+ord(x)) for x in c.upper()) if len(c)==2 else '🌐'
+for line in lines:
+    if not is_external(line):
+        print(line)
 for line in open(p,errors='ignore'):
  a=line.rstrip('\n').split('\t');
  if len(a)!=4: continue
  sub,lat,c,node=a; x=json.loads(node); proto=x['_proto']; host=x.get('host') or x.get('add'); port=x.get('port',443); remark=f'Gayroxy-{flags(c)}-{sub}-{proto.upper()}-{host}'
  if proto=='vmess':
-  x['ps']=remark; raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode(); link='vmess://'+__import__('base64').b64encode(raw).decode()
+  x['ps']=remark; raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode(); link='vmess://'+base64.b64encode(raw).decode()
  else:
   u=urllib.parse.quote(x.get('user',''),safe=''); q={'type':x.get('type','tcp'),'security':x.get('security','')}
   if x.get('path'): q['path']=x['path']
