@@ -67,7 +67,7 @@ if p=='vmess':
   params=urllib.parse.parse_qs(q)
   d={'_proto':'vmess','_remark':urllib.parse.unquote(frag),'host':host,'port':int(port),'id':user,'aid':0,
      'type':params.get('type',['tcp'])[0],'security':params.get('security',[''])[0],'tls':(params.get('security',[''])[0] if params.get('security',[''])[0] in ('tls','reality') else ''),
-     'path':params.get('path',[''])[0],'sni':params.get('sni',[''])[0],
+     'path':params.get('path',[''])[0],'sni':params.get('sni',[''])[0],'fp':params.get('fp',[''])[0],
      'serviceName':params.get('serviceName',[''])[0],'method':params.get('method',['aes-256-gcm'])[0],
      'flow':params.get('flow',[''])[0],'pbk':params.get('pbk',[''])[0],'sid':params.get('sid',[''])[0]}
   print(json.dumps(d)); raise SystemExit
@@ -80,7 +80,7 @@ except ValueError: raise SystemExit(1)
 if ':' not in authority: raise SystemExit(1)
 host,port=authority.rsplit(':',1)
 params=urllib.parse.parse_qs(q)
-d={'_proto':p,'_remark':urllib.parse.unquote(frag),'host':host,'port':int(port),'user':urllib.parse.unquote(user),'type':params.get('type',['tcp'])[0],'security':params.get('security',[''])[0],'path':params.get('path',[''])[0],'sni':params.get('sni',[''])[0],'serviceName':params.get('serviceName',[''])[0],'method':params.get('method',['aes-256-gcm'])[0],'flow':params.get('flow',[''])[0],'pbk':params.get('pbk',[''])[0],'sid':params.get('sid',[''])[0]}
+d={'_proto':p,'_remark':urllib.parse.unquote(frag),'host':host,'port':int(port),'user':urllib.parse.unquote(user),'type':params.get('type',['tcp'])[0],'security':params.get('security',[''])[0],'path':params.get('path',[''])[0],'sni':params.get('sni',[''])[0],'fp':params.get('fp',[''])[0],'serviceName':params.get('serviceName',[''])[0],'method':params.get('method',['aes-256-gcm'])[0],'flow':params.get('flow',[''])[0],'pbk':params.get('pbk',[''])[0],'sid':params.get('sid',[''])[0]}
 print(json.dumps(d))
 PY
 }
@@ -95,18 +95,24 @@ elif stream['network']=='grpc': stream['grpcSettings']={'serviceName':x.get('ser
 elif stream['network']=='httpupgrade': stream['httpupgradeSettings']={'path':x.get('path') or '/','host':host}
 sec=x.get('security') or ('tls' if x.get('tls') else '')
 if sec in ('tls','reality'):
- stream['security']='tls'; stream['tlsSettings']={'serverName':x.get('sni') or host,'fingerprint':x.get('fp') or ''}
- if x.get('pbk') and x.get('sid'):  # Reality: fallback SNI + short id
-  stream['tlsSettings'].update({'fingerprint':x.get('fp') or 'chrome','serverName':x.get('sni') or x.get('host') or host,'realitySettings':{'publicKey':x.get('pbk'),'shortId':x.get('sid'),'serverName':x.get('sni') or x.get('host') or host}})
-if p=='vless' and x.get('flow'): stream.setdefault('sockopt',{})['tcpFastOpen']=True
-if p=='vmess':
-  u=x.get('id',''); return_obj={'protocol':'vmess','settings':{'vnext':[{'address':host,'port':port,'users':[{'id':u,'alterId':int(x.get('aid',0) or 0),'security':'auto'}]}]},'streamSettings':stream}
-elif p=='vless':
-  return_obj={'protocol':'vless','settings':{'vnext':[{'address':host,'port':port,'users':[{'id':x.get('user',''),'encryption':'none'}]}]},'streamSettings':stream}
+    stream['security']='tls'
+    fp=x.get('fp') or ('chrome' if sec=='reality' else '')
+    if sec=='reality':
+        # Reality: fingerprint + publicKey + shortId + serverName are mandatory
+        stream['tlsSettings']={'serverName':x.get('sni') or host,'fingerprint':fp or 'chrome','realitySettings':{'publicKey':x.get('pbk') or '','shortId':x.get('sid') or '','serverName':x.get('sni') or host}}
+    else:
+        stream['tlsSettings']={'serverName':x.get('sni') or host,'fingerprint':fp or ''}
+if p=='vless':
+    usr={'id':x.get('user',''),'encryption':'none'}
+    if x.get('flow'): usr['flow']=x.get('flow')          # reality+vision requires flow on the user
+    elif sec=='reality': usr['flow']='xtls-rprx-vision'  # reality w/o explicit flow: default vision
+    return_obj={'protocol':'vless','settings':{'vnext':[{'address':host,'port':port,'users':[usr]}]},'streamSettings':stream}
+elif p=='vmess':
+    u=x.get('id',''); return_obj={'protocol':'vmess','settings':{'vnext':[{'address':host,'port':port,'users':[{'id':u,'alterId':int(x.get('aid',0) or 0),'security':'auto'}]}]},'streamSettings':stream}
 elif p=='trojan':
-  return_obj={'protocol':'trojan','settings':{'servers':[{'address':host,'port':port,'password':x.get('user','')}]},'streamSettings':stream}
+    return_obj={'protocol':'trojan','settings':{'servers':[{'address':host,'port':port,'password':x.get('user','')}]},'streamSettings':stream}
 else:
-  return_obj={'protocol':'shadowsocks','settings':{'servers':[{'address':host,'port':port,'method':x.get('method','aes-256-gcm'),'password':x.get('user','')}]},'streamSettings':stream}
+    return_obj={'protocol':'shadowsocks','settings':{'servers':[{'address':host,'port':port,'method':x.get('method','aes-256-gcm'),'password':x.get('user','')}]},'streamSettings':stream}
 print(json.dumps(return_obj,separators=(',',':')))
 PY
 }
@@ -131,6 +137,25 @@ PY
   [[ -n "$result" ]] || return 1
   country=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null || echo '??')
   printf '%s|%s|%s\n' "$elapsed" "$country" "$node"
+}
+
+# Fast TCP pre-filter: connect to host:port with a short timeout. Cheaper than
+# booting xray for every candidate — a dead port is skipped before the full
+# tunnel test. Only nodes whose port accepts a connection proceed to test_node.
+# NOTE: this is a cheap heuristic only; the authoritative "config is alive"
+# check is test_node's full xray->socks->HTTP round trip, so a false positive
+# here can never leak a dead config into the pool.
+tcp_ping(){
+  local node="$1" host port
+  host=$(printf '%s' "$node" | python3 -c 'import sys,json; x=json.load(sys.stdin); print(x.get("host") or x.get("add") or "")' 2>/dev/null) || return 1
+  port=$(printf '%s' "$node" | python3 -c 'import sys,json; x=json.load(sys.stdin); print(int(x.get("port") or 443))' 2>/dev/null) || return 1
+  [[ -n "$host" ]] || return 1
+  if command -v nc >/dev/null 2>&1; then
+    timeout 4 nc -z -w2 "$host" "$port" 2>/dev/null
+  else
+    # Fallback: bash /dev/tcp (reports success on hung SYN — nc is preferred)
+    timeout 3 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null
+  fi
 }
 
 sub_name(){ python3 - "$1" <<'PY'
@@ -220,6 +245,8 @@ refresh_sources(){
       (( ${#nodes[@]} >= 120 )) && break
     done <<< "$content"
     for node in "${nodes[@]}"; do
+      # Fast TCP pre-filter: skip dead hosts before the expensive xray probe.
+      tcp_ping "$node" || continue
       result=$(test_node "$node" $((22000+index)) || true); index=$((index+1))
       [[ -n "$result" ]] && good+=("$result")
     done
