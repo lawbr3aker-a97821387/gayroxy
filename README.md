@@ -44,7 +44,7 @@ Go to **Settings → Secrets and variables → Actions**.
 |--------|:--------:|-------------|
 | `CF_TOKEN` | ✅ | Cloudflare API token — **Workers Scripts:Edit**, **Workers KV Storage:Edit**, **Account Settings:Read**. Add **Cloudflare Tunnel:Edit + Zone:Read + DNS:Edit** for the automatic named tunnel (stable domain). |
 | `GH_TOKEN` | ✅ | GitHub PAT with `repo` + `workflow` scope. Required — the auto-retrigger + keepalive dispatch the next run with it (a PAT outlives the built-in `GITHUB_TOKEN` and has higher rate limits). |
-| `EXTERNAL_SUB_URLS` | ❌ | Comma-separated external subscription URLs to merge (unset → only the 15 built-in configs) |
+| `EXTERNAL_SUB_URLS` | ❌ | Comma-separated external subscription URLs; panel-managed sources are stored in Worker KV. If unset, the built-in v2raycollector source is used. |
 
 **Just two secrets — that's it.** There are **two tunnel modes**:
 
@@ -174,13 +174,15 @@ PATH_VLESS="/vless"
 
 ### Adding External Subscriptions
 
-Set `EXTERNAL_SUB_URLS` secret:
+The **🔗 External Subs** panel tab lets you add and remove persistent subscription URLs; they are stored in Worker KV. The default source is `https://raw.githubusercontent.com/Kolandone/v2raycollector/main/config_lite.txt`. Every 10 minutes the isolated health agent fetches each source, performs a real proxied request through a separate xray process, records country and latency, and keeps up to the 10 fastest working nodes per source. These are added below the unchanged Gayroxy configs with names such as `Gayroxy-🇩🇪-source.example-VLESS`.
+
+Set `EXTERNAL_SUB_URLS` secret for additional read-only sources:
 
 ```text
 https://sub1.example.com/sub,https://sub2.example.com/sub,https://sub3.example.com/sub
 ```
 
-The panel's **🔗 External Subs** tab shows all sources and merge status.
+The panel's **🔗 External Subs** tab shows all sources and merge status. The generated `Gayroxy-🔄-Rotate-2min` entry is a stable client-facing VLESS config whose isolated auxiliary xray rotates its healthy backend every 120 seconds. If no external node is healthy, it safely falls back to direct routing; the main Gayroxy xray/configs are never restarted or modified.
 
 ---
 

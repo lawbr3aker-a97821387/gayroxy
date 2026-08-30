@@ -3,3 +3,7 @@ geo/
 logs/
 nginx.conf
 sub/
+aux/
+*.zip
+gayroxy-run-logs.txt
+.freebuff/

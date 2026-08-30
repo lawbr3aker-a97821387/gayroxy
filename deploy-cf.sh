@@ -172,6 +172,7 @@ put_value "${SUB_DIR}/index.html"        "index.html"
 put_value "${SUB_DIR}/panel.html"        "panel.html"
 put_value "${SUB_DIR}/subscription.b64"  "subscription.b64"
 put_value "${SUB_DIR}/subscription.b64"  "sub.txt"
+put_value "${AUX_DIR:-${WORKDIR}/aux}/health.json" "health.json"
 if [[ -d "$GEO_DIR" ]]; then
     for f in "$GEO_DIR"/*; do
         [[ -f "$f" ]] || continue
@@ -183,7 +184,14 @@ fi
 
 # ─── 4. Upload the Worker script (module format, KV binding) ─────────────────
 log "Uploading Worker '${SCRIPT_NAME}'..."
-METADATA="{\"main_module\":\"index.js\",\"compatibility_date\":\"2024-11-01\",\"bindings\":[{\"name\":\"ASSETS\",\"type\":\"kv_namespace\",\"namespace_id\":\"${NS_ID}\"}]}"
+# API_TOKEN (optional, from env): the panel→Worker write token for /api/subs.
+# Derived deterministically from SEED by proxy.sh so every run agrees on it.
+BINDINGS='[{"name":"ASSETS","type":"kv_namespace","namespace_id":"'${NS_ID}'"}'
+if [[ -n "${API_TOKEN:-}" ]]; then
+    BINDINGS+=',{"name":"API_TOKEN","type":"plain_text","text":"'${API_TOKEN}'"}'
+fi
+BINDINGS+=']'
+METADATA="{\"main_module\":\"index.js\",\"compatibility_date\":\"2024-11-01\",\"bindings\":${BINDINGS}}"
 api PUT "/accounts/${ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}" \
     -F "metadata=${METADATA};type=application/json" \
     -F "index.js=@${WORKDIR}/worker/index.js;type=application/javascript+module" >/dev/null

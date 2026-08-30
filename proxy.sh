@@ -93,11 +93,23 @@ AUTO_RETRIGGER="${AUTO_RETRIGGER:-0}"
 RUN_TIMEOUT_MIN="${RUN_TIMEOUT_MIN:-240}"
 RETRIGGER_LEAD_MIN="${RETRIGGER_LEAD_MIN:-8}"
 
-# External subscriptions (optional). Set the EXTERNAL_SUB_URLS secret/env to a
+# External subscriptions. Set the EXTERNAL_SUB_URLS secret/env to a
 # comma-separated list of subscription URLs to merge into the panel/sub. When
-# unset, no external configs are merged (only the 15 built-in Gayroxy configs).
-# Example: EXTERNAL_SUB_URLS="https://my-sub.example.com/sub,https://other.com/sub"
+# unset, the built-in DEFAULT_EXTERNAL_SUB is used so the health agent has a
+# source out of the box. Panel-added URLs persist in Worker KV (external_subs
+# key) and are picked up by the health agent each cycle.
+# Example: EXTERNAL_SUB_URLS="https://sub1.example.com/sub,https://sub2.example.com/sub"
 EXTERNAL_SUB_URLS="${EXTERNAL_SUB_URLS:-}"
+DEFAULT_EXTERNAL_SUB="https://raw.githubusercontent.com/Kolandone/v2raycollector/main/config_lite.txt"
+
+# ─── Health agent + Rotate 2min (isolated aux xray) ────────────────────────
+# The agent tests external-sub nodes through a DEDICATED secondary xray
+# instance (config-aux.json) and never touches the main xray, nginx or the
+# tunnel. It also supervises the "Rotate 2min" config, whose backend hops
+# between healthy pooled nodes every ROTATE2MIN_INTERVAL seconds.
+HEALTH_AGENT="${HEALTH_AGENT:-1}"
+HEALTH_INTERVAL="${HEALTH_INTERVAL:-600}"
+ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLU='\033[0;34m'
@@ -339,6 +351,14 @@ PATH_VLESS_HU="/$(derive_hex path/vless-hu 16)"
 PATH_TROJAN_HU="/$(derive_hex path/trojan-hu 16)"
 PATH_VMESS_HU="/$(derive_hex path/vmess-hu 16)"
 
+# Rotate 2min: stable client-facing config (fixed UUID/path). Its backend hops
+# between healthy pooled nodes inside the AUX xray (see health-agent.sh).
+# Deterministic from SEED like every other credential.
+PATH_ROTATE2MIN="/$(derive_hex path/rotate2min 16)"
+UUID_ROTATE2MIN=$(derive_uuid uuid/rotate2min)
+# Panel→Worker write token for /api/subs (deterministic from SEED).
+API_TOKEN=$(derive_hex api/token 32)
+
 # ─── Export vars for envsubst & render configs ──────────────────────────────
 log "Rendering config files from templates..."
 mkdir -p "$SUB_DIR" "$LOG_DIR"
@@ -443,6 +463,7 @@ export XRAY_LOG="${LOG_DIR}/xray.log" \
   PATH_VLESS PATH_TROJAN PATH_VMESS PATH_VLESS_GRPC PATH_TROJAN_GRPC \
   PATH_SS_WS PATH_SS_GRPC PATH_VMESS_GRPC \
   PATH_VLESS_HU PATH_TROJAN_HU PATH_VMESS_HU \
+  PATH_ROTATE2MIN UUID_ROTATE2MIN \
   GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN \
   GRPC_SERVICE_SS GRPC_SERVICE_VMESS \
   REALITY_PRIVATE REALITY_PUBLIC SHORT_ID REALITY_SNI
@@ -466,7 +487,7 @@ json.dump(cfg, open(p, 'w'), indent=2)
 fi
 
 # For nginx: only expand OUR variables, leave nginx's own vars ($http_upgrade, etc.)
-NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU'
+NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU $PATH_ROTATE2MIN'
 envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 
 # ─── Start services (skipped in RENDER_ONLY mode) ───────────────────────────
@@ -761,39 +782,46 @@ else
 fi
 
 ENC_PATH_VLESS=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_VLESS}")
+ENC_PATH_ROTATE2MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE2MIN}")
 ENC_PATH_TROJAN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_TROJAN}")
 
-VLESS_URL="vless://${UUID_VLESS}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_VLESS}&sni=${DOMAIN}&encryption=none#Gayroxy-🇺🇳-VLESS-WS"
+# Detect runner country for config remarks (e.g. 🇩🇪-VLESS-WS)
+RUNNER_CC=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null || echo '??')
+COUNTRY_FLAG=$(python3 -c "c='${RUNNER_CC}'.upper(); print(''.join(chr(127397+ord(x)) for x in c) if len(c)==2 else '🌐')")
 
-TROJAN_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&host=${DOMAIN}&path=${ENC_PATH_TROJAN}&sni=${DOMAIN}#Gayroxy-🇺🇳-Trojan-WS"
+VLESS_URL="vless://${UUID_VLESS}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_VLESS}&sni=${DOMAIN}&encryption=none#Gayroxy-${COUNTRY_FLAG}-VLESS-WS"
 
-VMESS_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-🇺🇳-VMess-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH_VMESS}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
+TROJAN_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&host=${DOMAIN}&path=${ENC_PATH_TROJAN}&sni=${DOMAIN}#Gayroxy-${COUNTRY_FLAG}-Trojan-WS"
+
+VMESS_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-${COUNTRY_FLAG}-VMess-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH_VMESS}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
 VMESS_URL="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
 
-VLESS_GRPC_URL="vless://${UUID_VLESS_GRPC}@${DOMAIN}:443?type=grpc&security=tls&fp=chrome&host=${DOMAIN}&serviceName=${GRPC_SERVICE_VLESS}&sni=${DOMAIN}&encryption=none#Gayroxy-🇺🇳-VLESS-gRPC"
+VLESS_GRPC_URL="vless://${UUID_VLESS_GRPC}@${DOMAIN}:443?type=grpc&security=tls&fp=chrome&host=${DOMAIN}&serviceName=${GRPC_SERVICE_VLESS}&sni=${DOMAIN}&encryption=none#Gayroxy-${COUNTRY_FLAG}-VLESS-gRPC"
 
-TROJAN_GRPC_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=grpc&security=tls&fp=chrome&host=${DOMAIN}&serviceName=${GRPC_SERVICE_TROJAN}&sni=${DOMAIN}#Gayroxy-🇺🇳-Trojan-gRPC"
+TROJAN_GRPC_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=grpc&security=tls&fp=chrome&host=${DOMAIN}&serviceName=${GRPC_SERVICE_TROJAN}&sni=${DOMAIN}#Gayroxy-${COUNTRY_FLAG}-Trojan-gRPC"
 
 SS_BASE="$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)"
-SS_URL="ss://${SS_BASE}@127.0.0.1:${PORT_SHADOWSOCKS}#Gayroxy-🇺🇳-SS-Local"
+SS_URL="ss://${SS_BASE}@127.0.0.1:${PORT_SHADOWSOCKS}#Gayroxy-${COUNTRY_FLAG}-SS-Local"
 
-REALITY_LOCAL_URL="vless://${UUID_REALITY}@127.0.0.1:${PORT_REALITY}?security=reality&flow=xtls-rprx-vision&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp&sni=${REALITY_SNI}#Gayroxy-🇺🇳-Reality-Local"
+REALITY_LOCAL_URL="vless://${UUID_REALITY}@127.0.0.1:${PORT_REALITY}?security=reality&flow=xtls-rprx-vision&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp&sni=${REALITY_SNI}#Gayroxy-${COUNTRY_FLAG}-Reality-Local"
 
 # New external protocols (WS/gRPC through Cloudflare tunnel)
-SS_WS_URL="ss://$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)@${DOMAIN}:443?type=ws&security=tls&path=${PATH_SS_WS}&host=${DOMAIN}#Gayroxy-🇺🇳-SS-WS"
-SS_GRPC_URL="ss://$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)@${DOMAIN}:443?type=grpc&security=tls&serviceName=${GRPC_SERVICE_SS}&host=${DOMAIN}#Gayroxy-🇺🇳-SS-gRPC"
+SS_WS_URL="ss://$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)@${DOMAIN}:443?type=ws&security=tls&path=${PATH_SS_WS}&host=${DOMAIN}#Gayroxy-${COUNTRY_FLAG}-SS-WS"
+SS_GRPC_URL="ss://$(echo -n "aes-256-gcm:${SS_PASS}" | base64 -w 0)@${DOMAIN}:443?type=grpc&security=tls&serviceName=${GRPC_SERVICE_SS}&host=${DOMAIN}#Gayroxy-${COUNTRY_FLAG}-SS-gRPC"
 
-VMESS_GRPC_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-🇺🇳-VMess-gRPC\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"grpc\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${GRPC_SERVICE_VMESS}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
+VMESS_GRPC_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-${COUNTRY_FLAG}-VMess-gRPC\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"grpc\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${GRPC_SERVICE_VMESS}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
 VMESS_GRPC_URL="vmess://$(echo -n "$VMESS_GRPC_JSON" | base64 -w 0)"
 
 # HTTPUpgrade protocols (new — simpler alternative to WS, works through nginx/CF)
-VLESS_HU_URL="vless://${UUID_VLESS}@${DOMAIN}:443?type=httpupgrade&security=tls&fp=chrome&host=${DOMAIN}&path=${PATH_VLESS_HU}&sni=${DOMAIN}&encryption=none#Gayroxy-🇺🇳-VLESS-HU"
-TROJAN_HU_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=httpupgrade&security=tls&fp=chrome&host=${DOMAIN}&path=${PATH_TROJAN_HU}&sni=${DOMAIN}#Gayroxy-🇺🇳-Trojan-HU"
-VMESS_HU_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-🇺🇳-VMess-HU\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH_VMESS_HU}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
+VLESS_HU_URL="vless://${UUID_VLESS}@${DOMAIN}:443?type=httpupgrade&security=tls&fp=chrome&host=${DOMAIN}&path=${PATH_VLESS_HU}&sni=${DOMAIN}&encryption=none#Gayroxy-${COUNTRY_FLAG}-VLESS-HU"
+TROJAN_HU_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=httpupgrade&security=tls&fp=chrome&host=${DOMAIN}&path=${PATH_TROJAN_HU}&sni=${DOMAIN}#Gayroxy-${COUNTRY_FLAG}-Trojan-HU"
+VMESS_HU_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-${COUNTRY_FLAG}-VMess-HU\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH_VMESS_HU}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
 VMESS_HU_URL="vmess://$(echo -n "$VMESS_HU_JSON" | base64 -w 0)"
 
-SOCKS5_URL="socks5://127.0.0.1:${PORT_SOCKS5}#Gayroxy-🇺🇳-Socks5"
-HTTP_URL="http://127.0.0.1:${PORT_HTTP_PROXY}#Gayroxy-🇺🇳-HTTP"
+ROTATE2MIN_URL="vless://${UUID_ROTATE2MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE2MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-2min"
+
+SOCKS5_URL="socks5://127.0.0.1:${PORT_SOCKS5}#Gayroxy-${COUNTRY_FLAG}-Socks5"
+HTTP_URL="http://127.0.0.1:${PORT_HTTP_PROXY}#Gayroxy-${COUNTRY_FLAG}-HTTP"
 
 # ─── Build subscription file ──────────────────────────────────────────────────
 SUB_CONTENT="${VLESS_URL}
@@ -808,6 +836,7 @@ ${VMESS_GRPC_URL}
 ${VLESS_HU_URL}
 ${TROJAN_HU_URL}
 ${VMESS_HU_URL}
+${ROTATE2MIN_URL}
 ${REALITY_LOCAL_URL}
 ${SOCKS5_URL}
 ${HTTP_URL}"
@@ -895,6 +924,9 @@ merge_external_subs() {
     local external_count=0
     local gayroxy_count=$(echo -n "$SUB_CONTENT" | grep -c '^' || true)
 
+    if [[ -z "${EXTERNAL_SUB_URLS:-}" ]]; then
+        EXTERNAL_SUB_URLS="$DEFAULT_EXTERNAL_SUB"
+    fi
     if [[ -n "${EXTERNAL_SUB_URLS:-}" ]]; then
         IFS=',' read -ra URLS <<< "$EXTERNAL_SUB_URLS"
         for url in "${URLS[@]}"; do
@@ -960,7 +992,7 @@ export WORKER_URL DOMAIN
 
 export SUB_B64 VLESS_URL TROJAN_URL VMESS_URL VLESS_GRPC_URL TROJAN_GRPC_URL
 export SS_URL SS_WS_URL SS_GRPC_URL VMESS_GRPC_URL
-export VLESS_HU_URL TROJAN_HU_URL VMESS_HU_URL
+export VLESS_HU_URL TROJAN_HU_URL VMESS_HU_URL ROTATE2MIN_URL
 export REALITY_LOCAL_URL SOCKS5_URL HTTP_URL
 export UUID_VLESS PATH_VLESS TROJAN_PASS PATH_TROJAN UUID_VMESS PATH_VMESS
 export UUID_VLESS_GRPC GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN
@@ -992,6 +1024,7 @@ keys = [
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
     'REALITY_PUBLIC','SUB_B64','DOMAIN','WORKER_URL','REALITY_SNI',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
+    'ROTATE2MIN_URL','API_TOKEN',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
 print(json.dumps(d))
@@ -1090,6 +1123,21 @@ if [[ "$boot_ok" != "1" ]]; then
     exit 1
 fi
 
+# ─── Health agent + Rotate 2min (isolated aux xray) ────────────────────────
+# Runs only in the live proxy job (never RENDER_ONLY). The agent manages its
+# own secondary xray instance for node testing and the Rotate 2min backend;
+# the main xray, nginx and the tunnel are left completely untouched.
+if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
+    (
+        export HEALTH_INTERVAL ROTATE2MIN_INTERVAL DOMAIN WORKER_URL SEED EXTERNAL_SUB_URLS DEFAULT_EXTERNAL_SUB API_TOKEN SUB_DIR PATH_ROTATE2MIN UUID_ROTATE2MIN
+        exec ./health-agent.sh
+    ) &
+    HEALTH_AGENT_PID=$!
+    log "Health agent started (pid ${HEALTH_AGENT_PID}, interval ${HEALTH_INTERVAL}s, rotate2min ${ROTATE2MIN_INTERVAL}s)"
+else
+    HEALTH_AGENT_PID=""
+fi
+
 # ─── Auto re-trigger (high #1) ─────────────────────────────────────────────
 # Fire the next workflow run ~RETRIGGER_LEAD_MIN before this run's timeout so
 # the next runner is already booting/render-deploying while we're still up.
@@ -1155,4 +1203,5 @@ wait "$XRAY_PID"
 wait "$WATCHDOG_PID" 2>/dev/null || true
 wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
 [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+[[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
 exit 0

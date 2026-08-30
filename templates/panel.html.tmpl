@@ -412,11 +412,37 @@
             </div>
         </div>
         <div class="stealth-note">
-            <strong>🔗 External Subscriptions</strong> — These are fetched at deploy time
-            and merged into <code>/sub</code>. If a source is offline, it is skipped but
-            the remaining sources and gayroxy configs are still included.
+            <strong>🔗 External Subscriptions</strong> — Add subscription URLs below.
+            A health agent tests every node on an interval, keeps the <b>10 best working
+            per source</b>, tags each with its country, and merges them under the gayroxy
+            configs in <code>/sub</code>. Your main gayroxy configs are never modified.
         </div>
-        <div id="external-list"></div>
+
+        <div class="sub-box" style="margin-bottom:16px;">
+            <h2>➕ Add Subscription</h2>
+            <div class="sub-inner">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input id="ext-url-input" type="url" placeholder="https://example.com/sub"
+                        style="flex:1;min-width:220px;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px;" />
+                    <button class="btn primary" onclick="addExternalSub()">Add</button>
+                </div>
+                <div id="ext-status" style="margin-top:10px;font-size:13px;color:var(--text2);"></div>
+            </div>
+        </div>
+
+        <div class="sub-box">
+            <h2>📋 Configured Sources</h2>
+            <div class="sub-inner">
+                <div id="external-list"></div>
+            </div>
+        </div>
+
+        <div class="sub-box" id="rotation-status-box">
+            <h2>🔄 Rotation Status</h2>
+            <div class="sub-inner">
+                <div id="rotation-status-list"></div>
+            </div>
+        </div>
     </div>
 
     <!-- ════ QR Modal ════ -->
@@ -725,32 +751,173 @@
 
     // ─── Build External Subs Tab ──────────────────────────────────────────────
 
-    function buildExternal() {
+    // ─── Build External Subs Tab (interactive, KV-backed) ─────────────────────
+    const ENV_URLS = (D.EXTERNAL_SUB_URLS || '').split(',').map(u => u.trim()).filter(Boolean);
+    const API_TOKEN = D.API_TOKEN || '';
+    const DEFAULT_SOURCE = 'https://raw.githubusercontent.com/Kolandone/v2raycollector/main/config_lite.txt';
+
+    function apiHeaders() {
+        return { 'Content-Type': 'application/json', 'x-gayroxy-token': API_TOKEN };
+    }
+
+    async function fetchSubs() {
+        try {
+            const res = await fetch(D.WORKER_URL + '/api/subs', { headers: apiHeaders() });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            return Array.isArray(data.subs) ? data.subs : [];
+        } catch (e) {
+            console.warn('fetchSubs failed', e);
+            return null;
+        }
+    }
+
+    function extStatus(msg, isError) {
+        const el = document.getElementById('ext-status');
+        if (el) el.innerHTML = '<span style="color:' + (isError ? 'var(--danger,#ff6b6b)' : 'var(--accent)') + '">' + msg + '</span>';
+    }
+
+    async function addExternalSub() {
+        const input = document.getElementById('ext-url-input');
+        const url = (input.value || '').trim();
+        if (!url) { extStatus('Enter a subscription URL first.', true); return; }
+        extStatus('Adding…');
+        try {
+            const res = await fetch(D.WORKER_URL + '/api/subs', {
+                method: 'POST', headers: apiHeaders(), body: JSON.stringify({ url })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+            input.value = '';
+            extStatus('✅ Added. The health agent will test its nodes within a few minutes.');
+            renderExternal();
+        } catch (e) {
+            extStatus('⚠️ Could not add: ' + e.message, true);
+        }
+    }
+
+    async function removeExternalSub(url) {
+        extStatus('Removing…');
+        try {
+            const res = await fetch(D.WORKER_URL + '/api/subs', {
+                method: 'DELETE', headers: apiHeaders(), body: JSON.stringify({ url })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+            extStatus('✅ Removed.');
+            renderExternal();
+        } catch (e) {
+            extStatus('⚠️ Could not remove: ' + e.message, true);
+        }
+    }
+
+    async function renderExternal() {
         const el = document.getElementById('external-list');
         if (!el) return;
+        const kvSubs = await fetchSubs();
+        const health = await fetch(D.WORKER_URL + '/health.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null);
+        const all = [];
+        for (const u of ENV_URLS) all.push({ url: u, source: 'env', removable: false });
+        if (!ENV_URLS.includes(DEFAULT_SOURCE)) all.unshift({ url: DEFAULT_SOURCE, source: 'default', removable: false });
+        if (kvSubs) for (const u of kvSubs) {
+            if (!ENV_URLS.includes(u)) all.push({ url: u, source: 'panel', removable: true });
+        }
 
-        // Get external sub URLs from DATA
-        const urls = (D.EXTERNAL_SUB_URLS || '').split(',').map(u => u.trim()).filter(Boolean);
-
-        if (urls.length === 0) {
+        if (all.length === 0) {
             el.innerHTML = '<div class="stealth-note" style="text-align:center;border-left-color:var(--text2);">' +
-                '<strong>ℹ️ No external subscriptions configured.</strong><br>' +
-                '<span style="font-size:13px;">Set <code>EXTERNAL_SUB_URLS</code> as a GitHub secret or env variable<br>' +
-                'e.g. <code>EXTERNAL_SUB_URLS=https://sub1.example.com/sub,https://sub2.example.com/sub</code></span></div>';
+                '<strong>ℹ️ No external subscriptions yet.</strong><br>' +
+                '<span style="font-size:13px;">Add one above — try <code>https://raw.githubusercontent.com/Kolandone/v2raycollector/main/config_lite.txt</code></span></div>';
             return;
         }
 
-        for (const url of urls) {
+        el.innerHTML = '';
+        for (const item of all) {
             const div = document.createElement('div');
             div.className = 'program-section';
+            div.style.marginBottom = '10px';
+            const badge = item.source === 'default'
+                ? '<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(78,205,196,.15);color:var(--accent4);">default</span>'
+                : item.source === 'env'
+                ? '<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08);color:var(--text2);">env/secret</span>'
+                : '<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(0,212,170,.15);color:var(--accent);">panel</span>';
             div.innerHTML =
-                '<h4>🔗 <span style="color:var(--text2);font-weight:400;">Source:</span> ' +
-                '<a href="' + url + '" target="_blank" style="color:var(--accent);text-decoration:none;word-break:break-all;">' + url + '</a></h4>' +
-                '<div style="color:var(--text2);font-size:13px;">' +
-                '  <span style="color:var(--accent4);">⏱</span> Fetched at deploy time and merged into <code>/sub</code>' +
+                '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+                '<div style="flex:1;min-width:200px;word-break:break-all;">' +
+                '<a href="' + item.url + '" target="_blank" style="color:var(--accent);text-decoration:none;font-size:13px;">' + item.url + '</a>' +
+                (health && health.sources && health.sources[new URL(item.url).hostname] ? '<div style="font-size:12px;color:var(--text2);margin-top:5px;">✅ ' + health.sources[new URL(item.url).hostname].length + ' healthy nodes</div>' : '') +
+                ' &nbsp;' + badge +
+                '</div>' +
+                (item.removable ? '<button class="btn outline" style="padding:6px 12px;font-size:12px;" data-del-url="' + encodeURIComponent(item.url) + '">Remove</button>' : '') +
                 '</div>';
             el.appendChild(div);
         }
+
+        el.querySelectorAll('[data-del-url]').forEach(btn => {
+            btn.addEventListener('click', () => removeExternalSub(decodeURIComponent(btn.dataset.delUrl)));
+        });
+    }
+
+    // ─── Rotation Status ──────────────────────────────────────────────────────
+    // Shows which rotation algorithms are active and which backend they point to.
+    const ROTATION_ALGOS = [
+        { key: 'rotate2min', label: '🔄 Rotate 2min', desc: 'Rotates through healthy nodes every 2 minutes' }
+    ];
+
+    async function renderRotationStatus() {
+        const el = document.getElementById('rotation-status-list');
+        if (!el) return;
+        let health = null;
+        try {
+            const r = await fetch(D.WORKER_URL + '/health.json', { cache: 'no-store' });
+            if (r.ok) health = await r.json();
+        } catch(e) {}
+        const rotation = health && health.rotation ? health.rotation : null;
+        if (!rotation || !rotation.algo) {
+            el.innerHTML = '<div style="font-size:13px;color:var(--text2);text-align:center;padding:12px;">' +
+                '<span style="opacity:.5;">🔄 No rotation algorithm active.</span><br>' +
+                '<span style="font-size:11px;">Enable the health agent in your workflow to activate.</span></div>';
+            return;
+        }
+        const algo = ROTATION_ALGOS.find(a => a.key === rotation.algo) || { label: rotation.algo, desc: '' };
+        const flag = rotation.country ? codeToFlag(rotation.country) : '🌐';
+        const countryName = rotation.country || '??';
+        const host = rotation.host || '—';
+        const activeTag = rotation.routingRule || rotation.tag || '—';
+        const interval = rotation.intervalSec || 120;
+        el.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">' +
+            '<div class="program-section" style="margin:0;">' +
+                '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+                    '<div style="font-size:24px;">' + flag + '</div>' +
+                    '<div style="flex:1;min-width:180px;">' +
+                        '<div style="font-weight:600;font-size:15px;">' + algo.label + '</div>' +
+                        '<div style="font-size:12px;color:var(--text2);margin-top:2px;">' + algo.desc + '</div>' +
+                    '</div>' +
+                    '<div style="text-align:right;">' +
+                        '<div style="font-size:11px;color:var(--text2);">interval</div>' +
+                        '<div style="font-weight:600;">' + interval + 's</div>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+            '<div class="program-section" style="margin:0;border-left:3px solid var(--accent);">' +
+                '<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Current Backend</div>' +
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+                    '<div style="font-size:20px;">' + flag + '</div>' +
+                    '<div style="flex:1;min-width:140px;">' +
+                        '<div style="font-weight:600;">' + host + '</div>' +
+                        '<div style="font-size:12px;color:var(--text2);">' + countryName + ' &middot; <code style="font-size:11px;">' + activeTag + '</code></div>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+            '<div style="font-size:11px;color:var(--text2);padding:0 4px;">' +
+                'Last check: ' + (health.checkedAt ? new Date(health.checkedAt).toLocaleString() : 'never') +
+                '&nbsp;&middot;&nbsp; The client config is <b>fixed</b> — only this backend changes.' +
+            '</div>' +
+        '</div>';
+    }
+
+    function codeToFlag(code) {
+        if (!code || code.length !== 2) return '🌐';
+        return String.fromCodePoint(...[...code.toUpperCase()].map(c => 0x1F1E6 - 65 + c.charCodeAt(0)));
     }
 
     // ─── Build Counts from DATA ────────────────────────────────────────────────
@@ -773,7 +940,8 @@
     renderCards();
     buildPrograms();
     buildGeo();
-    buildExternal();
+    renderExternal();
+    renderRotationStatus();
     buildCounts();
 </script>
 </body>

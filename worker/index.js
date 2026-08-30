@@ -49,11 +49,123 @@ function isBinary(key) {
   return /\.(dat|db|mmdb|png|ico|woff2?)$/i.test(key);
 }
 
+// ─── Panel-managed external subscriptions API ────────────────────────────────
+// KV key "external_subs" holds a JSON array of subscription URLs added from the
+// web panel. Light auth: the panel sends the shared token derived from SEED.
+const SUBS_KEY = 'external_subs';
+const MAX_SUBS = 20;
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}
+
+function validUrl(u) {
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+async function getSubs(env) {
+  const raw = await env.ASSETS.get(SUBS_KEY);
+  if (!raw) return [];
+  try {
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list.filter((u) => typeof u === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+async function putSubs(env, subs) {
+  await env.ASSETS.put(SUBS_KEY, JSON.stringify(subs));
+}
+
+async function handleSubs(request, env) {
+  const url = new URL(request.url);
+  const token = request.headers.get('x-gayroxy-token') || url.searchParams.get('token') || '';
+  // When an expected token binding exists, enforce it on every method. Without
+  // a binding, writes require any non-empty token (defense-in-depth) while
+  // GET stays open so the panel can list sources without secrets.
+  const expect = env.API_TOKEN || '';
+  if (expect && token !== expect) {
+    return json({ error: 'unauthorized' }, 401);
+  }
+
+  if (request.method === 'GET') {
+    return json({ subs: await getSubs(env) });
+  }
+
+  if (request.method === 'POST') {
+    if (!token) return json({ error: 'missing token' }, 401);
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: 'invalid JSON body' }, 400);
+    }
+    const incoming = (Array.isArray(body) ? body : [body.url]).filter(Boolean);
+    if (incoming.length === 0) return json({ error: 'no url provided' }, 400);
+    const subs = await getSubs(env);
+    let added = 0;
+    let rejected = 0;
+    for (const u of incoming) {
+      const candidate = String(u).trim();
+      if (!validUrl(candidate)) { rejected++; continue; }
+      if (subs.includes(candidate)) continue;
+      if (subs.length >= MAX_SUBS) { rejected++; continue; }
+      subs.push(candidate);
+      added++;
+    }
+    await putSubs(env, subs);
+    return json({ subs, added, rejected });
+  }
+
+  if (request.method === 'DELETE') {
+    if (!token) return json({ error: 'missing token' }, 401);
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: 'invalid JSON body' }, 400);
+    }
+    const target = String(body.url || '').trim();
+    const subs = (await getSubs(env)).filter((u) => u !== target);
+    await putSubs(env, subs);
+    return json({ subs, removed: target });
+  }
+
+  return json({ error: 'method not allowed' }, 405);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/favicon.ico') {
       return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === '/api/subs') {
+      return handleSubs(request, env);
+    }
+    if (url.pathname === '/api/health') {
+      if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+      const token = request.headers.get('x-gayroxy-token') || '';
+      if (env.API_TOKEN && token !== env.API_TOKEN) return json({ error: 'unauthorized' }, 401);
+      const body = await request.text();
+      if (body.length > 256000) return json({ error: 'health report too large' }, 413);
+      await env.ASSETS.put('health.json', body, { metadata: { updatedAt: new Date().toISOString() } });
+      return json({ ok: true });
+    }
+
+    if (url.pathname === '/health.json') {
+      const health = await env.ASSETS.get('health.json', { type: 'text' });
+      return health ? new Response(health, { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' } }) : new Response('{}', { status: 404 });
     }
 
     const key = resolveKey(url.pathname);
