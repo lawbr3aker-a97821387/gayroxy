@@ -108,7 +108,11 @@ DEFAULT_EXTERNAL_SUB="https://raw.githubusercontent.com/Kolandone/v2raycollector
 # tunnel. It also supervises the "Rotate 2min" config, whose backend hops
 # between healthy pooled nodes every ROTATE2MIN_INTERVAL seconds.
 HEALTH_AGENT="${HEALTH_AGENT:-1}"
-HEALTH_INTERVAL="${HEALTH_INTERVAL:-600}"
+# Health cycle re-checks the included pool every HEALTH_INTERVAL (20 min);
+# every SUBS_REFRESH_INTERVAL (2 h) the external subs are refetched and any
+# newly-found working configs are merged in.
+HEALTH_INTERVAL="${HEALTH_INTERVAL:-1200}"
+SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-7200}"
 ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
@@ -1129,7 +1133,7 @@ fi
 # the main xray, nginx and the tunnel are left completely untouched.
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     (
-        export HEALTH_INTERVAL ROTATE2MIN_INTERVAL DOMAIN WORKER_URL SEED EXTERNAL_SUB_URLS DEFAULT_EXTERNAL_SUB API_TOKEN SUB_DIR PATH_ROTATE2MIN UUID_ROTATE2MIN
+        export HEALTH_INTERVAL SUBS_REFRESH_INTERVAL ROTATE2MIN_INTERVAL DOMAIN WORKER_URL SEED EXTERNAL_SUB_URLS DEFAULT_EXTERNAL_SUB API_TOKEN SUB_DIR PATH_ROTATE2MIN UUID_ROTATE2MIN
         exec ./health-agent.sh
     ) &
     HEALTH_AGENT_PID=$!

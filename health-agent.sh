@@ -4,10 +4,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
-HEALTH_INTERVAL="${HEALTH_INTERVAL:-600}"
+# Health cycle: re-check the already-included pool every HEALTH_INTERVAL.
+# Every SUBS_REFRESH_INTERVAL we also refetch the source subs and merge any
+# newly-discovered working configs (replacing dead or outperformed ones only).
+HEALTH_INTERVAL="${HEALTH_INTERVAL:-1200}"       # 20 min
+SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-7200}"  # 2 h
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-8}"
 BEST_PER_SUB="${BEST_PER_SUB:-10}"
-HEALTH_MAX_NODES="${HEALTH_MAX_NODES:-200}"
+# Consecutive failed probes before a pooled node is dropped from rotation.
+MAX_CONSEC_FAIL="${MAX_CONSEC_FAIL:-3}"
 ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
 XRAY_BIN="${XRAY_BIN:-$ROOT/xray}"
 DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
@@ -18,6 +23,7 @@ SUB_DIR="${SUB_DIR:-$ROOT/sub}"
 AUX_DIR="$ROOT/aux"
 AUX_LOG="$ROOT/logs/aux"
 POOL_FILE="$AUX_DIR/pool.tsv"
+POOL_STATE="$AUX_DIR/pool-state.json"   # per-node consecutive failure / last-seen tracking
 ROTATE_CONFIG="$AUX_DIR/rotate2min.json"
 ROTATE_META="$AUX_DIR/rotate-meta.tsv"
 ROTATE_STATE="$AUX_DIR/rotate-state.json"
@@ -141,35 +147,145 @@ load_urls(){
   fi
 }
 
-run_cycle(){
+# Re-test only the currently-included pool (no source refetch). Runs every
+# HEALTH_INTERVAL (default 20 min). Updates per-node latency/country and drops
+# a node only after MAX_CONSEC_FAIL consecutive failed probes — so a transient
+# blip never yanks a working config out of rotation.
+health_only(){
+  [[ -s "$POOL_FILE" ]] || { log "pool empty; waiting for a source refresh"; return 0; }
+  local -a kept=() rej=()
+  local port=$((21000))
+  while IFS=$'\t' read -r name latency country node; do
+    [[ -n "$name" && -n "$node" ]] || continue
+    local res
+    res=$(test_node "$node" "$port" || true); port=$((port+1))
+    if [[ -n "$res" ]]; then
+      # latest latency|country from the live probe; keep name + node as-is
+      local nl nc
+      IFS='|' read -r nl nc _ <<< "$res"
+      kept+=("$name|$nl|$nc|$node")
+      update_state "$node" 0
+    else
+      if bump_fail "$node"; then
+        rej+=("$name|$node")
+      else
+        # Not yet at the drop threshold — keep it one more cycle (don't interrupt).
+        kept+=("$name|$latency|$country|$node")
+      fi
+    fi
+  done < "$POOL_FILE"
   : > "$POOL_FILE"
-  local index=0 url name content line node result count
+  for row in "${kept[@]}"; do
+    IFS='|' read -r name lat c node <<< "$row"
+    printf '%s\t%s\t%s\t%s\n' "$name" "$lat" "$c" "$node" >> "$POOL_FILE"
+  done
+  for row in "${rej[@]}"; do IFS='|' read -r name node <<< "$row"; log "dropped (${MAX_CONSEC_FAIL} consecutive fails): $name ${node:0:40}"; done
+  log "health pass: ${#kept[@]} remain in pool"
+  finalize
+}
+
+# Refetch every external sub, health-test a fresh batch of candidates, and merge
+# the results into the pool — keeping the currently-working nodes and only
+# swapping in newly-found working configs when they beat (or replace) a worse
+# or dead one. Per sub we hold at most BEST_PER_SUB configs, ordered by latency.
+refresh_sources(){
+  local -a kept=()
+  local index=0 url name content line node result
   declare -A seen=()
+  # Seed with every currently-active pool row so a source that is briefly
+  # unreachable never wipes the working set. (5th field = existing flag)
+  if [[ -s "$POOL_FILE" ]]; then
+    while IFS=$'\t' read -r name latency country node; do
+      [[ -n "$name" && -n "$node" ]] && kept+=("$name|$latency|$country|$node|1")
+    done < "$POOL_FILE"
+  fi
   while IFS= read -r url; do
     [[ -z "$url" || -n "${seen[$url]:-}" ]] && continue
-    seen[$url]=1; name=$(sub_name "$url"); content=$(fetch_sub "$url" || true)
-    [[ -n "$content" ]] || { warn "No nodes from $url"; continue; }
-    local -a nodes=(); count=0
+    seen[$url]=1; name=$(sub_name "$url")
+    content=$(fetch_sub "$url" || true)
+    [[ -n "$content" ]] || { warn "No nodes from $url (keeping existing pool)"; continue; }
+    local -a nodes=() good=()
     while IFS= read -r line; do
       node=$(normalise "$line" 2>/dev/null || true); [[ -n "$node" ]] || continue
-      nodes+=("$node"); count=$((count+1)); ((count >= HEALTH_MAX_NODES)) && break
+      nodes+=("$node")
+      (( ${#nodes[@]} >= 120 )) && break
     done <<< "$content"
-    local -a good=(); local i=0
     for node in "${nodes[@]}"; do
-      result=$(test_node "$node" $((21000+index)) || true); index=$((index+1))
+      result=$(test_node "$node" $((22000+index)) || true); index=$((index+1))
       [[ -n "$result" ]] && good+=("$result")
     done
-    if (( ${#good[@]} > 0 )); then
-      printf '%s\n' "${good[@]}" | sort -t'|' -k1,1n | head -n "$BEST_PER_SUB" | while IFS='|' read -r latency country node; do
-        printf '%s\t%s\t%s\t%s\n' "$name" "$latency" "$country" "$node" >> "$POOL_FILE"
-      done
-    fi
-    log "$name: ${#good[@]} working; kept up to $BEST_PER_SUB"
+    # Add this sub's new working candidates to the merge list.
+    for r in "${good[@]}"; do kept+=("$name|$r|0"); done
+    log "$name: ${#good[@]} fresh working candidates (pool merge keeps up to $BEST_PER_SUB/sub)"
   done < <(load_urls)
-  write_health_json
-  write_merged_sub
-  write_rotate_config
+  # Write candidate rows to a temp file and let select_pool read it (a heredoc
+  # owns python stdin, so data must travel by file, not pipe).
+  local cand="$AUX_DIR/.merge-cands.tsv"
+  printf '%s\n' "${kept[@]}" > "$cand"
+  select_pool "$cand"
+  rm -f "$cand"
+  finalize
 }
+
+# Merge all rows (existing pool first, then fresh candidates), then per sub keep
+# the BEST_PER_SUB fastest working configs. Existing active nodes win latency
+# ties so we don't churn a working exit for an equal one.
+select_pool(){
+  python3 - "$POOL_FILE" "$BEST_PER_SUB" "$1" <<'PY'
+import sys,collections
+p,limit,cand=sys.argv[1],int(sys.argv[2]),sys.argv[3]
+subs=collections.defaultdict(list)
+for line in open(cand,errors='ignore'):
+ if not line.strip(): continue
+ a=line.rstrip('\n').split('|')
+ if len(a)!=4 and len(a)!=5: continue
+ if len(a)==5:
+  sub,lat,country,node,existing=a
+ else:
+  sub,lat,country,node=a; existing='0'
+ subs[sub].append((int(lat), country, node, int(existing)))
+out=[]
+for sub,entries in subs.items():
+ # sort by (latency, prefer-existing) => existing wins ties
+ entries.sort(key=lambda r:(r[0], 0 if r[3] else 1))
+ for lat,country,node,_ in entries[:limit]:
+  out.append((sub,lat,country,node))
+with open(p,'w') as f:
+ for sub,lat,country,node in out:
+  f.write('%s\t%s\t%s\t%s\n'%(sub,lat,country,node))
+print('pool:',len(out),'configs across',len(subs),'subs')
+PY
+}
+
+# Persist/read consecutive-failure counters for pooled nodes.
+update_state(){ python3 - "$POOL_STATE" "$1" "$2" <<'PY'
+import sys,json,os
+p,node,ok=sys.argv[1],sys.argv[2],sys.argv[3]
+st={}
+if os.path.exists(p):
+ try: st=json.load(open(p))
+ except Exception: pass
+k=node[:80]
+st.setdefault(k,{'fails':0})
+st[k]['fails']=0 if ok=='0' else st[k].get('fails',0)+1
+json.dump(st,open(p,'w'))
+PY
+}
+bump_fail(){ python3 - "$POOL_STATE" "$1" "$MAX_CONSEC_FAIL" <<'PY' | grep -q '^1$'
+import sys,json,os
+p,node,lim=sys.argv[1],sys.argv[2],int(sys.argv[3])
+st={}
+if os.path.exists(p):
+ try: st=json.load(open(p))
+ except Exception: pass
+k=node[:80]; f=st.get(k,{}).get('fails',0)+1
+print('1' if f>=lim else '0')
+st[k]={'fails':f}
+json.dump(st,open(p,'w'))
+PY
+}
+
+finalize(){ write_health_json; write_merged_sub; write_rotate_config; }
 
 write_health_json(){
   local rotate_state="${AUX_DIR}/rotate-state.json"
@@ -342,9 +458,22 @@ PY
 
 main(){
   [[ -x "$XRAY_BIN" ]] || warn "xray binary not found; health checks will fail"
-  run_cycle
+  # First run: full source refresh so the pool is populated and the merged
+  # sub / rotate config are written before any rotation happens.
+  refresh_sources
   if (( ONCE == 1 )); then log "One health cycle complete"; return 0; fi
   rotate_loop & ROTATE_PID=$!
-  while :; do sleep "$HEALTH_INTERVAL"; run_cycle; done
+  # Two-tier scheduler:
+  #  - every HEALTH_INTERVAL (20 min): re-health the included pool only
+  #  - every SUBS_REFRESH_INTERVAL (2 h): refetch sources and merge new configs
+  local elapsed=0
+  while :; do
+    sleep "$HEALTH_INTERVAL"; elapsed=$((elapsed + HEALTH_INTERVAL))
+    if (( elapsed >= SUBS_REFRESH_INTERVAL )); then
+      refresh_sources; elapsed=0
+    else
+      health_only
+    fi
+  done
 }
 main
