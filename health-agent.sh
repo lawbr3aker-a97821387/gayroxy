@@ -42,7 +42,7 @@ fetch_sub(){
   local body
   body=$(curl -fsSL --max-time 20 --retry 1 "$1" 2>/dev/null || true)
   [[ -n "$body" ]] || return 1
-  if ! printf '%s' "$body" | grep -qE '(^|[[:space:]])(vless|vmess|trojan|ss)://'; then
+  if ! [[ "$body" == *'vless://'* || "$body" == *'vmess://'* || "$body" == *'trojan://'* || "$body" == *'ss://'* ]]; then
     body=$(printf '%s' "$body" | tr -d '\r\n ' | base64 -d 2>/dev/null || true)
   fi
   printf '%s\n' "$body" | grep -E '^(vless|vmess|trojan|ss)://' || true
