@@ -398,23 +398,59 @@ def is_external(line):
         except Exception: pass
     return False
 flags=lambda c: ''.join(chr(127397+ord(x)) for x in c.upper()) if len(c)==2 else '🌐'
+
+# Track best 10 per external sub by latency
+from collections import defaultdict
+ext_groups = defaultdict(list)
+
+# First pass: collect all external configs with their latency
+for line in open(p,errors='ignore'):
+    a=line.rstrip('\n').split('\t');
+    if len(a)!=4: continue
+    sub,lat,c,node=a
+    lat=int(lat)
+    x=json.loads(node)
+    proto=x['_proto']
+    host=x.get('host') or x.get('add')
+    port=x.get('port',443)
+    ext_groups[sub].append({
+        'latency': lat, 'country': c, 'proto': proto,
+        'host': host, 'port': port, 'node': node
+    })
+
+# Keep top 10 per external sub by latency (lowest first)
+kept = []
+for sub, configs in ext_groups.items():
+    configs.sort(key=lambda c: c['latency'])
+    for idx, cfg in enumerate(configs[:10], 1):
+        cfg['index'] = idx
+        kept.append((sub, cfg))
+
+# Output non-external native configs first
 for line in lines:
     if not is_external(line):
         print(line)
-for line in open(p,errors='ignore'):
- a=line.rstrip('\n').split('\t');
- if len(a)!=4: continue
- sub,lat,c,node=a; x=json.loads(node); proto=x['_proto']; host=x.get('host') or x.get('add'); port=x.get('port',443); remark=f'Gayroxy-{flags(c)}-{sub}-{proto.upper()}-{host}'
- if proto=='vmess':
-  x['ps']=remark; raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode(); link='vmess://'+base64.b64encode(raw).decode()
- else:
-  u=urllib.parse.quote(x.get('user',''),safe=''); q={'type':x.get('type','tcp'),'security':x.get('security','')}
-  if x.get('path'): q['path']=x['path']
-  if x.get('sni'): q['sni']=x['sni']
-  if x.get('serviceName'): q['serviceName']=x['serviceName']
-  query=urllib.parse.urlencode(q)
-  scheme=proto; link=f'{scheme}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
- print(link)
+
+# Then output kept external configs with latency in remark
+for sub, cfg in kept:
+    lat=cfg['latency']; c=cfg['country']; proto=cfg['proto']
+    host=cfg['host']; port=cfg['port']; idx=cfg['index']
+    remark=f'External-{flags(c)}-{proto.upper()}-{lat}ms-{idx:03d}'
+    x=json.loads(cfg['node'])
+    if proto=='vmess':
+        x['ps']=remark
+        raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode()
+        link='vmess://'+base64.b64encode(raw).decode()
+    else:
+        u=urllib.parse.quote(x.get('user',''),safe='')
+        q={'type':x.get('type','tcp'),'security':x.get('security','')}
+        if x.get('path'): q['path']=x['path']
+        if x.get('sni'): q['sni']=x['sni']
+        if x.get('serviceName'): q['serviceName']=x['serviceName']
+        query=urllib.parse.urlencode(q)
+        scheme=proto
+        link=f'{scheme}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
+    print(link)
 PY
   cat "$SUB_DIR/external-healthy.txt" | base64 -w0 > "$SUB_DIR/subscription.b64"
   push_sub
