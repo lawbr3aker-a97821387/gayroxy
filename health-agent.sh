@@ -203,7 +203,17 @@ health_only(){
       kept+=("$name|$nl|$nc|$node")
       update_state "$node" 0
     else
-      if bump_fail "$node"; then
+      # Full tunnel test failed from the runner. This is often runner-egress,
+      # not proof the node is dead for the user (the GitHub runner frequently
+      # cannot complete reality/ws tunnel round-trips to regional nodes that
+      # DO work from Iran). If the host:port is STILL TCP-alive, keep it and
+      # reset the failure counter — mirroring refresh_sources' TCP-alive
+      # fallback so a working-for-the-user node is never dropped from rotation
+      # just because OUR runner can't full-test it.
+      if tcp_ping "$node"; then
+        update_state "$node" 0
+        kept+=("$name|$latency|$country|$node")
+      elif bump_fail "$node"; then
         rej+=("$name|$node")
       else
         # Not yet at the drop threshold — keep it one more cycle (don't interrupt).
