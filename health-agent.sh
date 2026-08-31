@@ -412,6 +412,21 @@ for line in open(p,errors='ignore'):
  print(link)
 PY
   cat "$SUB_DIR/external-healthy.txt" | base64 -w0 > "$SUB_DIR/subscription.b64"
+  push_sub
+}
+
+# Push the freshly-merged public subscription to the Worker KV so /sub reflects
+# the health agent's capped external pool (deploy-cf.sh only uploads at render
+# time; without this the served sub never updates after boot).
+push_sub(){
+  [[ -s "$SUB_DIR/subscription.b64" ]] || return 0
+  [[ -n "${WORKER_URL:-}" ]] || return 0
+  curl -fsS --max-time 10 -X POST \
+    -H "Content-Type: text/plain; charset=utf-8" \
+    -H "x-gayroxy-token: ${API_TOKEN:-}" \
+    --data-binary @"$SUB_DIR/subscription.b64" \
+    "$WORKER_URL/api/sub" >/dev/null 2>&1 \
+    && log "Pushed merged subscription to KV" 2>/dev/null || true
 }
 
 write_rotate_config(){

@@ -153,6 +153,21 @@ export default {
     if (url.pathname === '/api/subs') {
       return handleSubs(request, env);
     }
+    // POST/PUT the merged public subscription (health agent → KV). Mirrors the
+    // /api/health write path: shared token auth, body is the base64 sub payload.
+    // Stored under both names the worker serves so /sub and /subscription.b64
+    // both resolve to the freshly-merged file.
+    if (url.pathname === '/api/sub') {
+      if (request.method !== 'POST' && request.method !== 'PUT') return json({ error: 'method not allowed' }, 405);
+      const token = request.headers.get('x-gayroxy-token') || '';
+      if (env.API_TOKEN && token !== env.API_TOKEN) return json({ error: 'unauthorized' }, 401);
+      const body = await request.text();
+      if (body.length > 2_000_000) return json({ error: 'sub too large' }, 413);
+      if (!/^[A-Za-z0-9+/=\s]+$/.test(body)) return json({ error: 'expected base64 payload' }, 400);
+      await env.ASSETS.put('sub.txt', body, { metadata: { updatedAt: new Date().toISOString() } });
+      await env.ASSETS.put('subscription.b64', body, { metadata: { updatedAt: new Date().toISOString() } });
+      return json({ ok: true });
+    }
     if (url.pathname === '/api/health') {
       if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);
       const token = request.headers.get('x-gayroxy-token') || '';
