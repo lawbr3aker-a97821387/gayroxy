@@ -250,19 +250,11 @@ refresh_sources(){
     for node in "${nodes[@]}"; do
       # Fast TCP pre-filter: skip dead hosts before the expensive xray probe.
       tcp_ping "$node" || continue
+      # STRICT gate: only a full tunnel test (real xray through the node)
+      # qualifies. A TCP-alive-but-full-test-failed node is dropped — it is not
+      # proven to carry traffic and would only waste a slot in the user's sub.
       result=$(test_node "$node" $((22000+index)) || true); index=$((index+1))
-      if [[ -n "$result" ]]; then
-        good+=("$result")
-      else
-        # TCP-alive but the full tunnel test failed from the runner's vantage
-        # point. Still include (penalized latency) — many reality/ws nodes reject
-        # US-datacenter egress yet work for the user; the TCP ping already proved
-        # the server accepts connections. Penalty ranks them below any
-        # full-test-passing config, so they only fill slots when nothing better
-        # exists.
-        local lat country; lat=$((HEALTH_TIMEOUT*1000+10000)); country='??'
-        good+=("${lat}|${country}|${node}")
-      fi
+      [[ -n "$result" ]] && good+=("$result")
     done
     # Add this sub's new working candidates to the merge list.
     for r in "${good[@]}"; do kept+=("$name|$r|0"); done
@@ -298,7 +290,20 @@ out=[]
 for sub,entries in subs.items():
  # sort by (latency, prefer-existing) => existing wins ties
  entries.sort(key=lambda r:(r[0], 0 if r[3] else 1))
- for lat,country,node,_ in entries[:limit]:
+ # Dedupe by host (ignoring port) so one server can't fill several slots.
+ seen_hosts=set(); keep=[]
+ for lat,country,node,existing in entries:
+  try:
+   import json as _j
+   host=_j.loads(node).get('host') or _j.loads(node).get('add')
+  except Exception:
+   host=None
+  if host:
+   hk=host.lower()
+   if hk in seen_hosts: continue
+   seen_hosts.add(hk)
+  keep.append((lat,country,node))
+ for lat,country,node in keep[:limit]:
   out.append((sub,lat,country,node))
 with open(p,'w') as f:
  for sub,lat,country,node in out:
