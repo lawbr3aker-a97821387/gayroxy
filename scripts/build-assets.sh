@@ -31,6 +31,10 @@ export HEALTH_AGENT=0
 # RENDER-only mode never starts services/tunnel/WARP (matches proxy.sh RENDER_ONLY).
 export WARP_ACTIVE=false WARP_BIN="" CLOUDFLARED_BIN=""
 
+# Ensure output dirs exist (proxy.sh created sub/ + logs/ itself; we run as a
+# fresh job step with no prior mkdir, so build-assets.sh must own them).
+mkdir -p "${SUB_DIR}" "${LOG_DIR}"
+
 # ─────────────────────────────────────────────────────────────
 # GEO download (was proxy.sh lines 381-460)
 # ─────────────────────────────────────────────────────────────
