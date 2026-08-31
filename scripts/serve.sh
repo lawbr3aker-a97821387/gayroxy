@@ -322,6 +322,7 @@ else
     if [[ -n "$CF_TOKEN" ]]; then
         resolve_named_host || TUNNEL_DOMAIN=""
     fi
+fi
 
 # ─── Start xray first ────────────────────────────────────────────────────────
 log "Starting Xray-core..."
@@ -467,7 +468,6 @@ if [[ -z "$TUNNEL_DOMAIN" ]]; then
     fi
     log "Quick tunnel established: https://${TUNNEL_DOMAIN}"
 fi
-fi   # end RENDER_ONLY guard (services block)
 
 if [[ -n "$TUNNEL_DOMAIN" ]]; then
     DOMAIN="$TUNNEL_DOMAIN"
