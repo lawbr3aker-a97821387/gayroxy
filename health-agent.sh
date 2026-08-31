@@ -131,7 +131,10 @@ PY
   "$XRAY_BIN" run -c "$cfg" >"$out" 2>&1 & local pid=$!
   sleep .7
   local t result country; t=$(date +%s%N)
+  # Primary probe through the node; fall back to a second endpoint so a
+  # single blocked geo-API cannot reject every config (runner egress varies).
   result=$(curl -fsS --max-time "$HEALTH_TIMEOUT" --proxy "socks5h://127.0.0.1:$port" 'http://ip-api.com/json?fields=countryCode' 2>/dev/null || true)
+  [[ -n "$result" ]] || result=$(curl -fsS --max-time "$HEALTH_TIMEOUT" --proxy "socks5h://127.0.0.1:$port" 'https://api.ipify.org?format=json' 2>/dev/null || true)
   local elapsed=$((($(date +%s%N)-t)/1000000))
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   [[ -n "$result" ]] || return 1
@@ -248,7 +251,18 @@ refresh_sources(){
       # Fast TCP pre-filter: skip dead hosts before the expensive xray probe.
       tcp_ping "$node" || continue
       result=$(test_node "$node" $((22000+index)) || true); index=$((index+1))
-      [[ -n "$result" ]] && good+=("$result")
+      if [[ -n "$result" ]]; then
+        good+=("$result")
+      else
+        # TCP-alive but the full tunnel test failed from the runner's vantage
+        # point. Still include (penalized latency) — many reality/ws nodes reject
+        # US-datacenter egress yet work for the user; the TCP ping already proved
+        # the server accepts connections. Penalty ranks them below any
+        # full-test-passing config, so they only fill slots when nothing better
+        # exists.
+        local lat country; lat=$((HEALTH_TIMEOUT*1000+10000)); country='??'
+        good+=("${lat}|${country}|${node}")
+      fi
     done
     # Add this sub's new working candidates to the merge list.
     for r in "${good[@]}"; do kept+=("$name|$r|0"); done
