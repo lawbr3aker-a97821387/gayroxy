@@ -452,11 +452,19 @@ for sub, cfg in kept:
         raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode()
         link='vmess://'+base64.b64encode(raw).decode()
     else:
+        # Rebuild the URL preserving EVERY param needed for the protocol —
+        # especially Reality (pbk/sid/fp/flow), without which the client cannot
+        # handshake and the config is dead in nekobox.
         u=urllib.parse.quote(x.get('user',''),safe='')
         q={'type':x.get('type','tcp'),'security':x.get('security','')}
         if x.get('path'): q['path']=x['path']
         if x.get('sni'): q['sni']=x['sni']
         if x.get('serviceName'): q['serviceName']=x['serviceName']
+        if x.get('flow'): q['flow']=x['flow']
+        if x.get('pbk'): q['pbk']=x['pbk']
+        if x.get('sid'): q['sid']=x['sid']
+        if x.get('fp'): q['fp']=x['fp']
+        if x.get('method'): q['method']=x['method']
         query=urllib.parse.urlencode(q)
         scheme=proto
         link=f'{scheme}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
