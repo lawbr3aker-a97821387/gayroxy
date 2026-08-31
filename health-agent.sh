@@ -438,9 +438,9 @@ write_rotate_config(){
   # Country of the runner itself (the main Gayroxy exit) for the pool-main entry.
   local main_country
   main_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null || echo '??')
-  python3 - "$POOL_FILE" "$ROTATE_CONFIG" "$ROTATE_META" "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}" <<'PY'
+  python3 - "$POOL_FILE" "$ROTATE_CONFIG" "$ROTATE_META" "$ROTATE_STATE" "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}" <<'PY'
 import sys,json
-pool,out,meta_path,uuid,path,main_country,main_host=sys.argv[1:]
+pool,out,meta_path,state_path,uuid,path,main_country,main_host=sys.argv[1:]
 obs=[]; meta=[]
 # Main Gayroxy exit (this runner) is part of the rotation pool too.
 meta.append('pool-main\t%s\t%s' % (main_country, main_host))
@@ -470,6 +470,17 @@ open(meta_path,'w').write('\n'.join(meta)+'\n')
 first=next((o['tag'] for o in obs if o['tag'].startswith('pool-')),'pool-main')
 c={'log':{'loglevel':'warning'},'inbounds':[{'tag':'rotate2min','listen':'127.0.0.1','port':10018,'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate2min'],'outboundTag':first}]}}
 json.dump(c,open(out,'w'),indent=2)
+# Seed rotation state to the initial outbound so rotate_loop's first pick_next
+# never re-offers the node the config already points at (avoid a wasted first
+# rotation cycle when state.json is absent/empty).
+py_meta = {}
+for m in meta:
+ parts = m.split('\t')
+ if len(parts) == 3:
+  py_meta[parts[0]] = (parts[1], parts[2])
+seed = py_meta.get(first)
+if seed:
+ json.dump({'tag': first, 'country': seed[0], 'host': seed[1]}, open(state_path, 'w'))
 PY
   if [[ -x "$XRAY_BIN" ]]; then
     [[ -n "${AUX_ROTATE_PID:-}" ]] && kill "$AUX_ROTATE_PID" 2>/dev/null || true
