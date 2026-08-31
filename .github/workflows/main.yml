@@ -161,9 +161,6 @@ jobs:
         with:
           name: proxy-assets
           path: render-assets
-          # If render failed and produced no artifact, don't hard-fail this job —
-          # proxy still boots the tunnel regardless (if: always()).
-          fail-if-not-found: false
       - name: ☁️ Deploy assets to Cloudflare Worker + KV
         id: deploy
         env:
@@ -178,9 +175,15 @@ jobs:
           if [[ -d render-assets/sub ]]; then
             cp -r render-assets/sub/. sub/
           fi
-          # Cache may miss geo/ on a brand-new week — deploy-cf.sh tolerates that
-          # (warns and keeps existing KV geo values live).
-          ./deploy-cf.sh 2>&1
+          # If render failed and produced no sub artifact, don't deploy stale/
+          # missing assets here — deploy-cf.sh would push an empty/old sub. The
+          # proxy job (if: always()) still boots and LIVE_DEPLOY publishes the
+          # correct live sub, so a missing artifact just skips this pre-seed.
+          if [[ -f sub/subscription.b64 ]]; then
+            ./deploy-cf.sh 2>&1
+          else
+            echo "render artifact missing sub/subscription.b64 — skipping pre-seed deploy (proxy LIVE_DEPLOY will publish)."
+          fi
           echo "::endgroup::"
 
   proxy:
