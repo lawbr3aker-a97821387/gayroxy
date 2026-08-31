@@ -250,11 +250,21 @@ refresh_sources(){
     for node in "${nodes[@]}"; do
       # Fast TCP pre-filter: skip dead hosts before the expensive xray probe.
       tcp_ping "$node" || continue
-      # STRICT gate: only a full tunnel test (real xray through the node)
-      # qualifies. A TCP-alive-but-full-test-failed node is dropped — it is not
-      # proven to carry traffic and would only waste a slot in the user's sub.
+      # Full tunnel test ranks the config. The GitHub US runner often CANNOT
+      # complete reality/ws tunnel tests to regional nodes that DO work for the
+      # user (in Iran) — a failure here is runner-egress, not proof of a dead
+      # server. So: full-test passers carry real latency; TCP-alive-but-failed
+      # survivors still make the pool with a heavy latency penalty so they only
+      # fill slots when no full passers exist, and the user's client can test
+      # them from their own network.
       result=$(test_node "$node" $((22000+index)) || true); index=$((index+1))
-      [[ -n "$result" ]] && good+=("$result")
+      if [[ -n "$result" ]]; then
+        good+=("$result")
+      else
+        # TCP-alive but full test failed from the runner — keep with a penalty.
+        # (Cheap heuristic; a real-header geo-API cannot reject every config.)
+        good+=("$((HEALTH_TIMEOUT*1000+10000))|??|${node}")
+      fi
     done
     # Add this sub's new working candidates to the merge list.
     for r in "${good[@]}"; do kept+=("$name|$r|0"); done
