@@ -362,6 +362,11 @@ PATH_ROTATE2MIN="/$(derive_hex path/rotate2min 16)"
 UUID_ROTATE2MIN=$(derive_uuid uuid/rotate2min)
 # Panel→Worker write token for /api/subs (deterministic from SEED).
 API_TOKEN=$(derive_hex api/token 32)
+# Export NOW (not just before the health agent) so deploy-cf.sh — invoked later
+# for LIVE_DEPLOY at line ~1090 — sees it and binds env.API_TOKEN to the Worker.
+# Without the export deploy-cf.sh sees it as empty, skips the binding, and the
+# /api/sub & /api/health endpoints end up accepting UNAUTHENTICATED writes.
+export API_TOKEN
 
 # ─── Export vars for envsubst & render configs ──────────────────────────────
 log "Rendering config files from templates..."
