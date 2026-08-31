@@ -1,7 +1,11 @@
 name: Build & Deploy Proxy
 
 concurrency:
-  group: gayroxy-deploy
+  # v2 group: the original `gayroxy-deploy` is wedged by an un-cancellable
+  # in_progress run (33422909163, old 3-job workflow) that holds the group and
+  # blocks every new dispatch. A fresh group lets this run start immediately;
+  # serve.sh's handover lock safely handles the momentary tunnel overlap.
+  group: gayroxy-deploy-v2
   cancel-in-progress: true
 
 on:
