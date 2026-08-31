@@ -31,12 +31,16 @@ on:
 #    QUICK TUNNEL (random trycloudflare.com URL, rotated every run, published
 #    to the Worker within seconds of the tunnel booting).
 #
-#  TWO JOBS (proxy independent of render — the tunnel must never wait on
-#  asset publishing):
-#  • render — RENDER_ONLY=1: generates sub/panel/geo fast (~2 min), deploys
-#    to Cloudflare Worker+KV. Runs on every push/retrigger.
-#  • proxy  — runs the real long-lived tunnel (up to 240 min), publishes the
-#    live tunnel URL to the Worker at boot, re-triggers at the end.
+#  THREE JOBS (proxy independent of asset publishing — the tunnel must never
+#  wait on asset publishing):
+#  • render        — RENDER_ONLY=1: generates sub/panel/geo fast (~2 min).
+#  • deploy-assets — pushes render's generated assets to Cloudflare Worker+KV
+#                    (restores the weekly geo cache; downloads render's sub).
+#  • proxy         — runs the real long-lived tunnel (up to 240 min),
+#                    publishes the live tunnel URL to the Worker at boot,
+#                    re-triggers at the end.
+#
+#  Actions diagram: render ─► deploy-assets ─► proxy
 #
 #  SINGLE-RUN POLICY (concurrency group above):
 #  • Exactly ONE run in progress at a time. A new run cancels every older
@@ -112,18 +116,6 @@ jobs:
           ./proxy.sh 2>&1 | tee logs/render.log
           echo "::endgroup::"
 
-      - name: ☁️ Deploy assets to Cloudflare Worker + KV
-        id: deploy
-        env:
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
-          WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
-        run: |
-          mkdir -p logs
-          set -o pipefail
-          echo "::group::Cloudflare Deploy"
-          ./deploy-cf.sh 2>&1 | tee -a logs/render.log
-          echo "::endgroup::"
-
       - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -136,14 +128,70 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  proxy:
-    # needs: render — guarantees the render job's deploy (stale/placeholder sub)
-    # lands FIRST, then LIVE_DEPLOY inside proxy.sh overwrites KV with the live
-    # tunnel URL. Without this, the two independent deploys could race and leave
-    # a dead URL in KV for the whole cycle.
-    # if: always() — a render failure must NOT kill the tunnel: the proxy job
-    # still boots its own tunnel and LIVE_DEPLOY still publishes a working sub.
+  # deploy-assets — separate diagram node: pushes the render job's generated
+  # assets (sub/panel/subscription + geo DBs) to Cloudflare Worker+KV.
+  # Split out of render so the Actions graph shows the real two-stage
+  # pipeline (generate → publish) instead of one opaque render box, and so a
+  # deploy failure is isolated from asset generation. It restores the geo
+  # databases from the same weekly cache key (fast, content-addressed) and
+  # downloads the small sub artifacts produced by render.
+  deploy-assets:
     needs: render
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Make scripts executable
+        run: chmod +x deploy-cf.sh proxy.sh
+      - name: Compute cache week (geo refreshes weekly)
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: ♻️ Cache geo databases (weekly)
+        uses: actions/cache@v4
+        with:
+          path: geo
+          key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
+          restore-keys: |
+            geo-${{ runner.os }}-
+      - name: ⬇️ Download render artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy-assets
+          path: render-assets
+          # If render failed and produced no artifact, don't hard-fail this job —
+          # proxy still boots the tunnel regardless (if: always()).
+          fail-if-not-found: false
+      - name: ☁️ Deploy assets to Cloudflare Worker + KV
+        id: deploy
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
+        run: |
+          set -o pipefail
+          echo "::group::Cloudflare Deploy"
+          # Render's artifact keeps its sub/ directory; lay it into the expected
+          # sub/ path for deploy-cf.sh (geo/ comes from the restored cache).
+          mkdir -p sub
+          if [[ -d render-assets/sub ]]; then
+            cp -r render-assets/sub/. sub/
+          fi
+          # Cache may miss geo/ on a brand-new week — deploy-cf.sh tolerates that
+          # (warns and keeps existing KV geo values live).
+          ./deploy-cf.sh 2>&1
+          echo "::endgroup::"
+
+  proxy:
+    # needs: render + deploy-assets — guarantees the render job's generated
+    # assets are deployed (stale/placeholder sub) BEFORE this boots the tunnel,
+    # then LIVE_DEPLOY inside proxy.sh overwrites KV with the live tunnel URL.
+    # Without this, the two independent deploys could race and leave a dead URL
+    # in KV for the whole cycle.
+    # if: always() — a render/deploy failure must NOT kill the tunnel: the proxy
+    # job still boots its own tunnel and LIVE_DEPLOY still publishes a working sub.
+    needs: [render, deploy-assets]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 240
