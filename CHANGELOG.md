@@ -13,6 +13,9 @@ All notable changes to this project are documented here. Format loosely follows
   - `scripts/agent/health-agent.sh` — external-subscription health agent
   - `scripts/lib/` — shared constants (`common.sh`) + CF helpers (`cloudflare.sh`)
 - Removed the legacy top-level `proxy.sh` monolith entirely.
+- Fixed all script path references for the new layout (workflows, README,
+  legacy helpers), including the render step in `main.yml` which previously
+  referenced the pre-move `scripts/build-assets.sh` path.
 - Added CI quality gates: `.github/workflows/ci.yml` (shellcheck, shfmt,
   actionlint, render test, Worker check) and `tools/lint.sh` for local use.
 - Replaced the ASCII "How It Works" block in the README with mermaid diagrams.
