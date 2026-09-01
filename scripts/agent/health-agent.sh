@@ -2,7 +2,7 @@
 # External subscription health agent. It never edits or signals the main xray.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 # Health cycle: re-check the already-included pool every HEALTH_INTERVAL.
 # Every SUBS_REFRESH_INTERVAL we also refetch the source subs and merge any

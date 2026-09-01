@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/lib/*.sh deploy-cf.sh
+        run: chmod +x scripts/*.sh scripts/lib/*.sh scripts/publish/*.sh scripts/agent/*.sh
 
       - name: Compute cache week (geo refreshes weekly)
         id: week
@@ -106,7 +106,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x deploy-cf.sh
+        run: chmod +x scripts/publish/deploy-cf.sh
 
       - name: Compute cache week (geo refreshes weekly)
         id: week
@@ -142,7 +142,7 @@ jobs:
           # missing assets here — serve (if: always()) still boots and its
           # LIVE_DEPLOY publishes the correct live sub.
           if [[ -f sub/subscription.b64 ]]; then
-            ./deploy-cf.sh 2>&1
+            ./scripts/publish/deploy-cf.sh 2>&1
           else
             echo "render artifact missing sub/subscription.b64 — skipping pre-seed deploy (serve LIVE_DEPLOY will publish)."
           fi
@@ -173,7 +173,7 @@ jobs:
         run: |
           set -o pipefail
           echo "::group::Boot Verify"
-          ./scripts/boot-verify.sh 2>&1
+          ./scripts/publish/boot-verify.sh 2>&1
           echo "::endgroup::"
 
   # ── 4. publish-live ────────────────────────────────────────────────────────
@@ -192,7 +192,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x deploy-cf.sh scripts/publish-live.sh scripts/lib/*.sh
+        run: chmod +x scripts/publish/deploy-cf.sh scripts/publish/publish-live.sh scripts/lib/*.sh
 
       - name: ⬇️ Download render artifacts
         uses: actions/download-artifact@v4
@@ -218,7 +218,7 @@ jobs:
             exit 0
           fi
           export SUB_DIR="$PWD/sub"
-          ./scripts/publish-live.sh 2>&1
+          ./scripts/publish/publish-live.sh 2>&1
           echo "::endgroup::"
 
   # ── 5. serve ───────────────────────────────────────────────────────────────
@@ -241,7 +241,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/lib/*.sh deploy-cf.sh health-agent.sh .github/retrigger.sh
+        run: chmod +x scripts/*.sh scripts/lib/*.sh scripts/publish/*.sh scripts/agent/*.sh .github/retrigger.sh
 
       - name: Compute cache week (geo refreshes weekly)
         id: week

@@ -11,7 +11,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${SCRIPT_DIR}/scripts/lib/common.sh"
 
 # Canonical public Worker host: custom WORKER_DOMAIN → its host, else WORKER_URL host.

@@ -9,7 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${SCRIPT_DIR}/scripts/lib/common.sh"
 
 # deploy-cf.sh is standalone (own log/warn, does NOT source common.sh). It reads
@@ -32,7 +32,7 @@ if [[ ! -d "$SUB_DIR" ]]; then
     exit 1
 fi
 
-if "${SCRIPT_DIR}/deploy-cf.sh"; then
+if "${SCRIPT_DIR}/scripts/publish/deploy-cf.sh"; then
     DOMAIN="${DOMAIN:-${WORKER_DOMAIN:-${WORKER_URL#https://}}}"
     log "publish-live: ✔ live assets published: sub.txt now points at https://${DOMAIN}"
 else

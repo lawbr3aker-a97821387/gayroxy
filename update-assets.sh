@@ -16,9 +16,9 @@ export RENDER_ONLY=1
 export SEED="${SEED:-${CF_TOKEN:-gayroxy}}"
 
 echo "── Rendering assets (RENDER_ONLY, seed locked) ──"
-./proxy.sh
+./scripts/render/build-assets.sh
 
 echo "── Deploying to Cloudflare Worker + KV ──"
-./deploy-cf.sh
+./scripts/publish/deploy-cf.sh
 
 echo "✅ Done. Panel/sub/geo are live on the Worker URL printed above."

@@ -161,7 +161,7 @@ put_value() { # local_file kv_key
 SUB_DIR="${WORKDIR}/sub"
 GEO_DIR="${WORKDIR}/geo"
 if [[ ! -d "$SUB_DIR" ]]; then
-    echo "ERROR: ${SUB_DIR} not found — run ./proxy.sh (RENDER_ONLY=1) first, or use ./update-assets.sh." >&2
+    echo "ERROR: ${SUB_DIR} not found — run ./scripts/render/build-assets.sh (RENDER_ONLY=1) first, or use ./update-assets.sh." >&2
     exit 1
 fi
 

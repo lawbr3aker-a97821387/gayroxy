@@ -49,7 +49,8 @@ Go to **Settings → Secrets and variables → Actions**.
 **Just two secrets — that's it.** There are **two tunnel modes**:
 
 - **Named tunnel (fully automatic, stable configs):** with `CF_TOKEN` set, the
-  proxy runs on your **own stable hostname** — `proxy.sh` does everything at
+  proxy runs on your **own stable hostname** — `serve.sh` (plus the scripts under
+  `scripts/`) does everything at
   boot via the CF API: picks the first account + the first active zone, derives
   the fixed hostname `gaaayroxy.<zone>`, creates-or-reuses
   the tunnel, and points DNS at it (CNAME, proxied). No domain or tunnel-token
@@ -70,7 +71,7 @@ not GitHub Pages.
 | Account | Workers Scripts:Edit |
 | Account | Workers KV Storage:Edit |
 | Account | Account Settings:Read |
-| Account | Cloudflare Tunnel:Edit — for the automatic **named tunnel** (lets `proxy.sh` create/reuse the tunnel + fetch its token) |
+| Account | Cloudflare Tunnel:Edit — for the automatic **named tunnel** (lets `scripts/serve.sh` create/reuse the tunnel + fetch its token) |
 | Zone (pick your zone) | Zone:Read + DNS:Edit — for the automatic named tunnel's DNS route |
 | Zone (optional) | Workers Routes:Edit + DNS:Edit — only if you want a **custom domain** for the panel/sub (see step 3) |
 
@@ -164,7 +165,7 @@ live tunnel URL, and re-triggers itself 24/7.
 
 ### Customizing Protocols
 
-Edit `proxy.sh` — paths, ports, and protocol list are at the top:
+Edit `scripts/serve.sh` (or the shared constants in `scripts/lib/common.sh`) — paths, ports, and protocol list are at the top:
 
 ```bash
 PORT_VLESS=10001
@@ -188,44 +189,56 @@ The panel's **🔗 External Subs** tab shows all sources and merge status. The g
 
 ## 🔄 How It Works
 
+### Pipeline (categorized, not a straight line)
+
+```mermaid
+graph LR
+  subgraph Setup["🛠 Setup · short-lived"]
+    R[render<br/>templates → sub/]
+  end
+  subgraph Publish["☁️ Publish · short-lived"]
+    D[deploy-assets<br/>push to KV]
+    B[boot-verify<br/>probe /sub]
+    P[publish-live<br/>final LIVE_DEPLOY]
+  end
+  subgraph Runtime["⚡ Runtime · 240-min long-lived"]
+    S[serve<br/>boot xray+nginx+tunnel]
+    H[health-agent<br/>pool + rotate]
+    W[watchdog<br/>tunnel liveness]
+    T[retrigger<br/>auto-dispatch]
+  end
+
+  R --> D --> B --> P --> S
+  S --> H
+  S --> W
+  S --> T
+  T -.next run.-> R
+  H -.KV writes.-> D
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      GITHUB ACTIONS (24/7)                       │
-├─────────────────────────────────────────────────────────────────┤
-│  JOB 1 — render (fast, ~2 min, every run)                       │
-│   RENDER_ONLY=1: generate sub + panel + geo                     │
-│   → deploy-cf.sh: push assets to Cloudflare Worker + KV         │
-│   → assets live within ~1 min of every push (no 240-min wait)   │
-├─────────────────────────────────────────────────────────────────┤
-│  JOB 2 — proxy (long-lived, up to 240 min)                      │
-│  1. Checkout + install xray + cloudflared + WARP                │
-│  2. Generate deterministic UUIDs/passwords from SEED            │
-│  3. Start xray (13 protocols) + nginx                           │
-│  4. Handover lock: wait for old tunnel to drop (~30s) → tunnel │
-│  5. Create Cloudflare QUICK tunnel (random URL, no account)    │
-│  6. Re-render /sub + /panel + /geo with the LIVE tunnel URL    │
-│  7. deploy-cf.sh: publish live sub to Cloudflare KV (seconds)  │
-│  8. Watchdog: health-check tunnel; auto-re-trigger next run    │
-│     ~8 min before the 240-min cap (zero-downtime handover)     │
-│  9. Final step re-dispatches on ANY outcome (if: always())     │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      CLOUDFLARE EDGE                             │
-├─────────────────────────────────────────────────────────────────┤
-│  • Worker + KV: serves /sub, /panel, /geo, /  — ALWAYS ON,      │
-│    fast, independent of the runner (replaces GitHub Pages)       │
-│  • Quick tunnel: routes WS/gRPC/HU to the live runner           │
-└─────────────────────────────────────────────────────────────────┘
+
+### Data plane (runtime topology)
+
+```mermaid
+graph TD
+  C[Client devices] -->|HTTPS| CF[Cloudflare Edge]
+  CF -->|Named Tunnel| NX[nginx :443<br/>TLS termination]
+  NX --> XR[xray-core<br/>13 inbounds · 2 outbounds]
+  XR -->|warp outbound| W[Cloudflare WARP]
+  XR -->|direct outbound| I[Internet]
+  W --> I
+  CF -->|KV reads| KV[(CF KV<br/>sub · panel · geo)]
+  H[health-agent] -.->|probes pool| XR
+  H -.->|writes| KV
 ```
 
 **CLOUDFLARE WORKER + KV (always-on, even when the runner is offline):**
 - Serves `/panel`, `/sub.txt`, `/sub`, `/geo/*`, and `/` 24/7 from Workers KV
 - Refreshed by Job 1 (`render`) on every run, and by Job 2 with the **live
   tunnel URL** seconds after the tunnel boots (quick-tunnel URL rotates every run)
-- Deployed by `deploy-cf.sh` — needs only `CF_TOKEN` (self-discovers the
-  account, creates the KV namespace, uploads assets + Worker)
+- Deployed by `scripts/publish/deploy-cf.sh` — needs only `CF_TOKEN`
+  (self-discovers the account, creates the KV namespace, uploads assets + Worker)
+
+> 📚 More: [Architecture](docs/architecture.md) · [Configuration](docs/configuration.md)
 
 **Stealth features:**
 - Each run has unique `workflow name` = `Build & Deploy <run_id>`
@@ -305,7 +318,7 @@ in KV metadata) — unchanged runs upload nothing after the first deploy.
 
 ```bash
 # Full local run (quick tunnel, zero config)
-./proxy.sh
+./scripts/serve.sh
 
 # Render + deploy assets to Cloudflare from your laptop (no tunnel needed)
 CF_TOKEN=xxx ./update-assets.sh

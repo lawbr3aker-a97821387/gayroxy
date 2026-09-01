@@ -1,0 +1,10 @@
+# Normalize line endings for shell scripts so git doesn't mangle them
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text
+
+# Binaries / generated
+worker/* linguist-detectable=false
+geo/** linguist-generated=true
+sub/*.b64 linguist-generated=true

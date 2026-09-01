@@ -488,7 +488,7 @@ if [[ "$LIVE_DEPLOY" == "1" && "$RENDER_ONLY" != "1" ]]; then
         warn "LIVE_DEPLOY set but CF_TOKEN missing — skipping Cloudflare push."
         warn "(The deploy step in CI normally provides CF_TOKEN.)"
     else
-        if "${SCRIPT_DIR}/deploy-cf.sh"; then
+        if "${SCRIPT_DIR}/scripts/publish/deploy-cf.sh"; then
             log "Live assets published: sub.txt now points at https://${DOMAIN}"
         else
             warn "deploy-cf.sh failed — live URL not published (see logs above)."
@@ -499,7 +499,7 @@ fi
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     (
         export HEALTH_INTERVAL SUBS_REFRESH_INTERVAL ROTATE2MIN_INTERVAL DOMAIN WORKER_URL SEED EXTERNAL_SUB_URLS DEFAULT_EXTERNAL_SUB API_TOKEN SUB_DIR PATH_ROTATE2MIN UUID_ROTATE2MIN
-        exec ./health-agent.sh
+        exec ./scripts/agent/health-agent.sh
     ) &
     HEALTH_AGENT_PID=$!
     log "Health agent started (pid ${HEALTH_AGENT_PID}, interval ${HEALTH_INTERVAL}s, rotate2min ${ROTATE2MIN_INTERVAL}s)"

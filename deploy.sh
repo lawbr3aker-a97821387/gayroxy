@@ -224,8 +224,8 @@ ask "Run a one-shot verification deploy now? (builds assets + pushes to Cloudfla
 if [[ "${REPLY^^}" == "Y" ]]; then
     log "Running RENDER_ONLY + deploy-cf.sh locally..."
     cd "$REPO_DIR"
-    RENDER_ONLY=1 CF_TOKEN="$CF_TOKEN" WORKER_URL="" ./proxy.sh 2>&1 | tee logs/deploy-verify.log
-    CF_TOKEN="$CF_TOKEN" ./deploy-cf.sh 2>&1 | tee -a logs/deploy-verify.log
+    RENDER_ONLY=1 CF_TOKEN="$CF_TOKEN" WORKER_URL="" ./scripts/render/build-assets.sh 2>&1 | tee logs/deploy-verify.log
+    CF_TOKEN="$CF_TOKEN" ./scripts/publish/deploy-cf.sh 2>&1 | tee -a logs/deploy-verify.log
     log "Verification deploy complete. Check logs/deploy-verify.log"
 fi
 

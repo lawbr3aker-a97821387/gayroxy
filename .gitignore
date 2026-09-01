@@ -7,3 +7,6 @@ aux/
 *.zip
 gayroxy-run-logs.txt
 .freebuff/
+
+# Hermes agent session data (not part of the project)
+.hermes/

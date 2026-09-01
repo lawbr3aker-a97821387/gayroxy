@@ -17,9 +17,9 @@
 # ============================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/lib/common.sh"
-source "${SCRIPT_DIR}/lib/cloudflare.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${SCRIPT_DIR}/scripts/lib/common.sh"
+source "${SCRIPT_DIR}/scripts/lib/cloudflare.sh"
 
 # Ensure tools the render needs exist (curl/python3 are on the runner; bash is
 # required). download_geo uses curl + sha256sum + ln.
