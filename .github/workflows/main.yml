@@ -121,7 +121,7 @@ jobs:
             geo-${{ runner.os }}-
 
       - name: ⬇️ Download render artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: proxy-assets
           path: render-assets
@@ -195,7 +195,7 @@ jobs:
         run: chmod +x scripts/*.sh scripts/*/*.sh
 
       - name: ⬇️ Download render artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: proxy-assets
           path: render-assets
@@ -256,7 +256,7 @@ jobs:
             geo-${{ runner.os }}-
 
       - name: ⬇️ Download render artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: proxy-assets
           path: render-assets
