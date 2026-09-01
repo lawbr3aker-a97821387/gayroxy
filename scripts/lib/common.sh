@@ -4,6 +4,11 @@
 # VERBATIM from proxy.sh (lines 284-501) so every phase produces byte-identical
 # UUIDs/paths/API_TOKEN. NEVER "improve" these — the Worker binding and the
 # health-agent push auth depend on the exact values.
+#
+# Many variables here are shared constants that other scripts consume after
+# sourcing this file (XRAY_BIN, UUID_TROJAN_*, colors, ...). ShellCheck cannot
+# see cross-file usage, so it flags them as unused — these are intentional.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 # ─── Paths / dirs ───────────────────────────────────────────────────────────

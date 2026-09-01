@@ -142,7 +142,7 @@ kv_remote_md5() {  # key → echo remote md5 (empty if unknown)
 put_value() { # local_file kv_key
     local file="$1" key="$2"
     [[ -f "$file" ]] || { warn "missing asset (skipping): $file"; return 0; }
-    local md5 remote enc meta out
+    local md5 remote enc meta
     md5=$(md5sum "$file" | awk '{print $1}')
     remote=$(kv_remote_md5 "$key")
     if [[ -n "$remote" && "$remote" == "$md5" ]]; then
@@ -153,8 +153,10 @@ put_value() { # local_file kv_key
     # Store the md5 as KV metadata so the next run can skip unchanged uploads.
     meta=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "{\"md5\":\"${md5}\"}")
     # shellcheck disable=SC2155
-    out=$(api PUT "/accounts/${ACCOUNT_ID}/storage/kv/namespaces/${NS_ID}/values/${enc}?metadata=${meta}" \
-        --data-binary "@${file}") || return 1
+    if ! api PUT "/accounts/${ACCOUNT_ID}/storage/kv/namespaces/${NS_ID}/values/${enc}?metadata=${meta}" \
+        --data-binary "@${file}"; then
+        return 1
+    fi
     log "KV: ${key} ← $(basename "$file") ($(du -h "$file" | cut -f1))"
 }
 

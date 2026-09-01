@@ -39,7 +39,8 @@ mkdir -p "${SUB_DIR}" "${LOG_DIR}"
 # GEO download (was proxy.sh lines 381-460)
 # ─────────────────────────────────────────────────────────────
 download_geo() {
-    local today=$(date +%F)
+    local today
+    today=$(date +%F)
     local cache_base="${HOME}/.cache/gayroxy/geo/${today}"
     local cached=0
 
@@ -61,7 +62,8 @@ download_geo() {
         for f in "${cache_base}"/*; do
             [[ -f "$f" ]] && ln -f "$f" "${GEO_DIR}/" 2>/dev/null || cp -f "$f" "${GEO_DIR}/"
         done
-        local count=$(ls -1 "${GEO_DIR}" 2>/dev/null | wc -l)
+        local count
+        count=$(ls -1 "${GEO_DIR}" 2>/dev/null | wc -l)
         if (( count > 0 )); then
             log "geo: cache hit (${today}) — ${count} files reused."
             cached=1
@@ -276,7 +278,8 @@ print("\n".join(out))
 merge_external_subs() {
     local combined="$SUB_CONTENT"
     local external_count=0
-    local gayroxy_count=$(echo -n "$SUB_CONTENT" | grep -c '^' || true)
+    local gayroxy_count
+    gayroxy_count=$(echo -n "$SUB_CONTENT" | grep -c '^' || true)
 
     if [[ -z "${EXTERNAL_SUB_URLS:-}" ]]; then
         EXTERNAL_SUB_URLS="$DEFAULT_EXTERNAL_SUB"
@@ -364,6 +367,7 @@ export PORT_SOCKS5 PORT_HTTP_PROXY
 export DOMAIN
 
 # Build DATA JSON for the panel template (all URL/credential vars)
+# shellcheck disable=SC2155
 export DATA=$(python3 -c "
 import json, os
 keys = [

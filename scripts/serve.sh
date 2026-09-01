@@ -191,7 +191,8 @@ fi   # end RENDER_ONLY else (cloudflared + WARP)
 #   geoip.db/geosite.db   → sing-box clients (NekoBox — manual import)
 # Cached by date: if files for today exist in CACHE_DIR/geo/YYYY-MM-DD/, reuse them.
 download_geo() {
-    local today=$(date +%F)
+    local today
+    today=$(date +%F)
     local cache_base="${HOME}/.cache/gayroxy/geo/${today}"
     local cached=0
 
@@ -213,7 +214,8 @@ download_geo() {
         for f in "${cache_base}"/*; do
             [[ -f "$f" ]] && ln -f "$f" "${GEO_DIR}/" 2>/dev/null || cp -f "$f" "${GEO_DIR}/"
         done
-        local count=$(ls -1 "${GEO_DIR}" 2>/dev/null | wc -l)
+        local count
+        count=$(ls -1 "${GEO_DIR}" 2>/dev/null | wc -l)
         if (( count > 0 )); then
             log "geo: cache hit (${today}) — ${count} files reused."
             cached=1
