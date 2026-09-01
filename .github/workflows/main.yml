@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/lib/*.sh scripts/publish/*.sh scripts/agent/*.sh
+        run: chmod +x scripts/*.sh scripts/*/*.sh
 
       - name: Compute cache week (geo refreshes weekly)
         id: week
@@ -163,7 +163,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/lib/*.sh
+        run: chmod +x scripts/*.sh scripts/*/*.sh
 
       - name: 🔍 Verify Worker endpoint serves
         id: verify
@@ -192,7 +192,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x scripts/publish/deploy-cf.sh scripts/publish/publish-live.sh scripts/lib/*.sh
+        run: chmod +x scripts/*.sh scripts/*/*.sh
 
       - name: ⬇️ Download render artifacts
         uses: actions/download-artifact@v4
@@ -241,7 +241,7 @@ jobs:
           fetch-depth: 0
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/lib/*.sh scripts/publish/*.sh scripts/agent/*.sh .github/retrigger.sh
+        run: chmod +x scripts/*.sh scripts/*/*.sh .github/retrigger.sh
 
       - name: Compute cache week (geo refreshes weekly)
         id: week
