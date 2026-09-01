@@ -53,9 +53,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Bash syntax check all scripts
         run: |
-          for f in $(find scripts -name '*.sh' -type f); do
+          while IFS= read -r -d '' f; do
             bash -n "$f" || echo "SYNTAX FAIL: $f"
-          done
+          done < <(find scripts -name '*.sh' -type f -print0)
 
   worker-check:
     runs-on: ubuntu-latest

@@ -49,12 +49,13 @@ jobs:
           set -euo pipefail
           WF="Build & Deploy Proxy"
           REF="${GITHUB_REF_NAME:-master}"
-          REPO_FLAG="--repo ${REPO}"
+          # --repo is intentionally an array element so it survives word splitting.
+          REPO_FLAG=(--repo "$REPO")
 
           # 1) If a run is IN PROGRESS, the queue is serialized behind it
           #    (concurrency group) — queued runs are healthy and will start
           #    when it finishes. Do NOT cancel them (would churn every 15 min).
-          inprog=$(gh run list $REPO_FLAG --workflow "$WF" --branch "$REF" --limit 20 \
+          inprog=$(gh run list "${REPO_FLAG[@]}" --workflow "$WF" --branch "$REF" --limit 20 \
             --json status --jq '[.[] | select(.status == "in_progress")] | length' \
             2>/dev/null || echo 0)
           if (( inprog > 0 )); then
@@ -65,18 +66,18 @@ jobs:
           # 2) No in-progress run. A run stuck in 'queued' > 6 minutes is
           #    wedged (no runner will ever pick it up — the queue is broken,
           #    not busy). Cancel it to free the slot.
-          stuck=$(gh run list $REPO_FLAG --workflow "$WF" --branch "$REF" --limit 20 \
+          stuck=$(gh run list "${REPO_FLAG[@]}" --workflow "$WF" --branch "$REF" --limit 20 \
             --json databaseId,status,updatedAt --jq \
             '.[] | select(.status == "queued") |
              select((now - (.updatedAt | fromdateiso8601)) > 360) | .databaseId' \
             2>/dev/null || true)
           for id in $stuck; do
             echo "⚠️ Run #$id stuck in 'queued' >6min with no in-progress run — cancelling."
-            gh run cancel "$id" $REPO_FLAG 2>&1 || true
+            gh run cancel "$id" "${REPO_FLAG[@]}" 2>&1 || true
           done
 
           # 3) Ensure at least one run is active (queued or in_progress).
-          active=$(gh run list $REPO_FLAG --workflow "$WF" --branch "$REF" --limit 20 \
+          active=$(gh run list "${REPO_FLAG[@]}" --workflow "$WF" --branch "$REF" --limit 20 \
             --json status --jq '[.[] | select(.status != "completed")] | length' \
             2>/dev/null || echo 0)
           if (( active > 0 )); then
@@ -86,5 +87,5 @@ jobs:
 
           # 4) Chain is dead — dispatch a fresh run to restore service.
           echo "⚠️ No active run of '$WF' — dispatching to restore the proxy chain."
-          gh workflow run "$WF" $REPO_FLAG --ref "$REF"
+          gh workflow run "$WF" "${REPO_FLAG[@]}" --ref "$REF"
           echo "Dispatched."
