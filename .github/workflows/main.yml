@@ -76,7 +76,7 @@ jobs:
           mkdir -p logs
           set -o pipefail
           echo "::group::Render Output"
-          ./scripts/build-assets.sh 2>&1 | tee logs/render.log
+          ./scripts/render/build-assets.sh 2>&1 | tee logs/render.log
           echo "::endgroup::"
 
       - name: 📤 Upload artifacts
