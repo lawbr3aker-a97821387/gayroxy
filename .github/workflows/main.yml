@@ -1,12 +1,12 @@
 name: Build & Deploy Proxy
 
 concurrency:
-  # v3 group: v2 is wedged by an un-cancellable in_progress run
-  # (33564083894, serve step immune to cancel — GitHub queues the
-  # termination but the runner never frees until the 240-min timeout).
-  # A fresh group per wedge lets the newest dispatch start immediately;
-  # serve.sh's handover lock safely handles the momentary tunnel overlap.
-  group: gayroxy-deploy-v3
+  # Group per wedge: each time an in_progress serve (240-min step, immune to
+  # GitHub cancel — termination is queued but never delivered until timeout)
+  # wedges the group, bump to the next version so the newest dispatch starts
+  # immediately. serve.sh's handover lock handles the momentary overlap.
+  # History: v1 → 33422909163, v2 → 33564083894, v3 → 33574439636.
+  group: gayroxy-deploy-v4
   cancel-in-progress: true
 
 on:
