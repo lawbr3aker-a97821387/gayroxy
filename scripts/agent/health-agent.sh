@@ -665,10 +665,18 @@ gen_rotate_config(){
     || echo '??')
 
   python3 - "$POOL_FILE" "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$run_country" "$main_host" "$port" <<'PY'
-import sys,json
+import sys,json,os
 pool,out,meta_path,state_path,uuid,path,main_country,main_host,listen_port=sys.argv[1:]
+WARP_PORT=int(os.environ.get('WARP_PORT','40000'))
 obs=[]; meta=[]
 meta.append('pool-main\t%s\t%s' % (main_country, main_host))
+# Always offer WARP egress (SOCKS5 on WARP_PORT) so rotation has a working,
+# datacenter-accepted exit even when every external node is down. This is the
+# free always-on rotating egress. Skipped if WARP didn't come up on the runner.
+if os.environ.get('WARP_ACTIVE')=='true':
+    meta.append('pool-warp\tWARP\t127.0.0.1')
+    obs.append({'tag':'pool-warp','protocol':'socks',
+        'settings':{'servers':[{'address':'127.0.0.1','port':WARP_PORT}]}})
 for n,line in enumerate(open(pool,errors='ignore')):
  a=line.rstrip('\n').split('\t')
  if len(a)!=4: continue
@@ -690,7 +698,8 @@ for n,line in enumerate(open(pool,errors='ignore')):
   obs.append(o)
  except Exception: pass
 if not obs: obs=[{'tag':'pool-main','protocol':'freedom'}]
-else: obs.append({'tag':'pool-main','protocol':'freedom'})
+else:
+    if not any(o['tag']=='pool-main' for o in obs): obs.append({'tag':'pool-main','protocol':'freedom'})
 open(meta_path,'w').write('\n'.join(meta)+'\n')
 first=next((o['tag'] for o in obs if o['tag'].startswith('pool-')),'pool-main')
 c={'log':{'loglevel':'warning'},'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':first}]}}
