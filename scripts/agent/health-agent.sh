@@ -763,6 +763,9 @@ start_aux_xray(){
 # led by $1 (the newly selected node), with up to $2 fallback nodes available so
 # a client whose primary node dies mid-interval transparently fails over instead
 # of getting an error.  Every node in the chain is an ip-api-verified pool node.
+# NOTE: `fallbackTag` is deliberately NOT used — this xray build (26.x) rejects
+# it at startup ("not all dependencies are resolved") and the process dies
+# immediately. The balancer's selector alone gives node failover.
 set_rotate_target(){
   local cfg="$1" lead="$2" fb_max="${3:-3}"
   python3 - "$cfg" "$lead" "$fb_max" <<'PY'
@@ -777,9 +780,9 @@ if not tags:
 chain=[lead]+[t for t in tags if t!=lead]
 chain=chain[:1+fb_max]
 if lead not in chain: chain=[lead]+chain
-# Balancer led by `lead`, falling back across the rest of the chain.
+# Balancer led by `lead`, failing over across the rest of the chain.
 d.setdefault('routing',{})
-d['routing']['balancers']=[{'tag':'rotate-bal','selector':chain,'fallbackTag':lead}]
+d['routing']['balancers']=[{'tag':'rotate-bal','selector':chain}]
 # Point the rotate inbound through the balancer.
 rules=d['routing'].get('rules',[])
 for r in rules:
