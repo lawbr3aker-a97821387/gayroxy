@@ -287,7 +287,11 @@ jobs:
           LIVE_DEPLOY: "1"
           HEALTH_AGENT: "1"
           HEALTH_INTERVAL: "600"
+          ROTATE1MIN_INTERVAL: "60"
           ROTATE2MIN_INTERVAL: "120"
+          ROTATE5MIN_INTERVAL: "300"
+          PARALLEL_PROBES: "10"
+          HEALTH_TIMEOUT: "10"
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}

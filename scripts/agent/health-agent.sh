@@ -1,19 +1,36 @@
 #!/usr/bin/env bash
-# External subscription health agent. It never edits or signals the main xray.
+# External subscription health agent.  Never edits or signals the main xray.
+#
+# Design:
+#   - Rotation: three independent aux xray processes on ports 10030/10032/10034
+#     (above the main xray's inbound range 10001-10016) that proxy through pool nodes at 1/2/5-minute intervals. The main Gayroxy
+#     xray (clients connect here) is never touched by rotation.
+#   - Health:   parallel probing (10 concurrent xray instances via xargs -P10).
+#     Each probe spins up a temporary xray, curls ip-api.com through it, and
+#     reports latency + country.
+#   - Leaderboard: per-external-sub top-10 JSON (aux/pool-leaderboard.json).
+#     On each health cycle, new candidates with better latency than the 10th
+#     slot are inserted in order; the 11th is evicted.  The flat pool.tsv is
+#     rebuilt from the leaderboard on every finalize.
+#   - ip-api.com is the single source of truth for exit-country (used for both
+#     rotation metadata and per-config country tags in the subscription).
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
-# Health cycle: re-check the already-included pool every HEALTH_INTERVAL.
-# Every SUBS_REFRESH_INTERVAL we also refetch the source subs and merge any
-# newly-discovered working configs (replacing dead or outperformed ones only).
-HEALTH_INTERVAL="${HEALTH_INTERVAL:-1200}"       # 20 min
-SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-7200}"  # 2 h
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-8}"
+# ─── Timing ───────────────────────────────────────────────────────────────────
+HEALTH_INTERVAL="${HEALTH_INTERVAL:-1200}"        # 20 min — health-only cycle
+SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-7200}"  # 2 h — full source refresh
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-10}"            # per-probe curl timeout (seconds)
 BEST_PER_SUB="${BEST_PER_SUB:-10}"
-# Consecutive failed probes before a pooled node is dropped from rotation.
 MAX_CONSEC_FAIL="${MAX_CONSEC_FAIL:-3}"
+PARALLEL_PROBES="${PARALLEL_PROBES:-10}"
+# Rotation intervals — three tiers, each its own aux xray
+ROTATE1MIN_INTERVAL="${ROTATE1MIN_INTERVAL:-60}"
 ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
+ROTATE5MIN_INTERVAL="${ROTATE5MIN_INTERVAL:-300}"
+# ─── Paths ────────────────────────────────────────────────────────────────────
 XRAY_BIN="${XRAY_BIN:-$ROOT/xray}"
 DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
 WORKER_URL="${WORKER_URL:-}"
@@ -23,21 +40,46 @@ SUB_DIR="${SUB_DIR:-$ROOT/sub}"
 AUX_DIR="$ROOT/aux"
 AUX_LOG="$ROOT/logs/aux"
 POOL_FILE="$AUX_DIR/pool.tsv"
-POOL_STATE="$AUX_DIR/pool-state.json"   # per-node consecutive failure / last-seen tracking
-ROTATE_CONFIG="$AUX_DIR/rotate2min.json"
-ROTATE_META="$AUX_DIR/rotate-meta.tsv"
-ROTATE_STATE="$AUX_DIR/rotate-state.json"
-ROTATE_PID=""
+POOL_STATE="$AUX_DIR/pool-state.json"
+LEADERBOARD="$AUX_DIR/pool-leaderboard.json"
+# Per-interval rotation state/config files
+ROTATE1MIN_CONFIG="$AUX_DIR/rotate1min.json"
+ROTATE1MIN_META="$AUX_DIR/rotate1min-meta.tsv"
+ROTATE1MIN_STATE="$AUX_DIR/rotate1min-state.json"
+ROTATE2MIN_CONFIG="$AUX_DIR/rotate2min.json"
+ROTATE2MIN_META="$AUX_DIR/rotate2min-meta.tsv"
+ROTATE2MIN_STATE="$AUX_DIR/rotate2min-state.json"
+ROTATE5MIN_CONFIG="$AUX_DIR/rotate5min.json"
+ROTATE5MIN_META="$AUX_DIR/rotate5min-meta.tsv"
+ROTATE5MIN_STATE="$AUX_DIR/rotate5min-state.json"
+# PIDs for the three aux xray instances + rotation loops
+# shellcheck disable=SC2034  # rotation/loop PIDs tracked for cleanup
+ROTATE1MIN_PID=""
+# shellcheck disable=SC2034
+ROTATE2MIN_PID=""
+# shellcheck disable=SC2034
+ROTATE5MIN_PID=""
+# shellcheck disable=SC2034
+LOOP1MIN_PID=""
+# shellcheck disable=SC2034
+LOOP2MIN_PID=""
+# shellcheck disable=SC2034
+LOOP5MIN_PID=""
 ONCE=0
 [[ "${1:-}" == "--once" ]] && ONCE=1
 mkdir -p "$AUX_DIR" "$AUX_LOG" "$SUB_DIR"
 
-log(){ echo -e "\033[0;32m[health-agent]\033[0m $*"; }
-warn(){ echo -e "\033[1;33m[health-agent] WARNING\033[0m $*"; }
+log()  { echo -e "\033[0;32m[health-agent]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[health-agent] WARNING\033[0m $*"; }
 
-cleanup(){ [[ -n "$ROTATE_PID" ]] && kill "$ROTATE_PID" 2>/dev/null || true; [[ -n "${AUX_ROTATE_PID:-}" ]] && kill "$AUX_ROTATE_PID" 2>/dev/null || true; }
+cleanup(){
+  for pid_var in ROTATE1MIN_PID ROTATE2MIN_PID ROTATE5MIN_PID LOOP1MIN_PID LOOP2MIN_PID LOOP5MIN_PID; do
+    [[ -n "${!pid_var:-}" ]] && kill "${!pid_var}" 2>/dev/null || true
+  done
+}
 trap cleanup INT TERM EXIT
 
+# ─── Subscription parsing ──────────────────────────────────────────────────────
 fetch_sub(){
   local body
   body=$(curl -fsSL --max-time 20 --retry 1 "$1" 2>/dev/null || true)
@@ -48,7 +90,6 @@ fetch_sub(){
   printf '%s\n' "$body" | grep -E '^(vless|vmess|trojan|ss)://' || true
 }
 
-# Normalise a link into JSON while preserving all credentials/settings.
 normalise(){ python3 - "$1" <<'PY'
 import sys,json,base64,urllib.parse,re
 s=sys.argv[1].strip(); m=re.match(r'^(vless|vmess|trojan|ss)://(.+)$',s)
@@ -58,7 +99,6 @@ if '#' in rest: rest,frag=rest.rsplit('#',1)
 if p=='vmess':
  try: d=json.loads(base64.b64decode(rest+'='*((-len(rest))%4)))
  except Exception:
-  # New v2rayN format: vmess://<uuid>@<host>:<port>?<query>#<frag> — no base64 blob.
   try:
    auth_rest,q=(rest.split('?',1) if '?' in rest else (rest,''))
    user,authority=auth_rest.rsplit('@',1)
@@ -85,7 +125,6 @@ print(json.dumps(d))
 PY
 }
 
-# Return xray outbound JSON for one normalised node.
 outbound_json(){ python3 - "$1" <<'PY'
 import sys,json,base64
 x=json.loads(sys.argv[1]); p=x['_proto']; host=x.get('host') or x.get('add'); port=int(x.get('port') or 443)
@@ -98,14 +137,13 @@ if sec in ('tls','reality'):
     stream['security']='tls'
     fp=x.get('fp') or ('chrome' if sec=='reality' else '')
     if sec=='reality':
-        # Reality: fingerprint + publicKey + shortId + serverName are mandatory
         stream['tlsSettings']={'serverName':x.get('sni') or host,'fingerprint':fp or 'chrome','realitySettings':{'publicKey':x.get('pbk') or '','shortId':x.get('sid') or '','serverName':x.get('sni') or host}}
     else:
         stream['tlsSettings']={'serverName':x.get('sni') or host,'fingerprint':fp or ''}
 if p=='vless':
     usr={'id':x.get('user',''),'encryption':'none'}
-    if x.get('flow'): usr['flow']=x.get('flow')          # reality+vision requires flow on the user
-    elif sec=='reality': usr['flow']='xtls-rprx-vision'  # reality w/o explicit flow: default vision
+    if x.get('flow'): usr['flow']=x.get('flow')
+    elif sec=='reality': usr['flow']='xtls-rprx-vision'
     return_obj={'protocol':'vless','settings':{'vnext':[{'address':host,'port':port,'users':[usr]}]},'streamSettings':stream}
 elif p=='vmess':
     u=x.get('id',''); return_obj={'protocol':'vmess','settings':{'vnext':[{'address':host,'port':port,'users':[{'id':u,'alterId':int(x.get('aid',0) or 0),'security':'auto'}]}]},'streamSettings':stream}
@@ -117,7 +155,28 @@ print(json.dumps(return_obj,separators=(',',':')))
 PY
 }
 
-# Test one node through a separate xray process. Output: latency|country|normalised-json.
+sub_name(){ python3 - "$1" <<'PY'
+import sys,urllib.parse,re
+u=urllib.parse.urlparse(sys.argv[1]); h=u.hostname or 'source'; print(re.sub(r'[^A-Za-z0-9._-]+','-',h)[:32])
+PY
+}
+
+# ─── Node testing ──────────────────────────────────────────────────────────────
+# Fast TCP pre-filter — skip dead hosts before the expensive xray probe.
+tcp_ping(){
+  local node="$1" host port
+  host=$(printf '%s' "$node" | python3 -c 'import sys,json; x=json.load(sys.stdin); print(x.get("host") or x.get("add") or "")' 2>/dev/null) || return 1
+  port=$(printf '%s' "$node" | python3 -c 'import sys,json; x=json.load(sys.stdin); print(int(x.get("port") or 443))' 2>/dev/null) || return 1
+  [[ -n "$host" ]] || return 1
+  if command -v nc >/dev/null 2>&1; then
+    timeout 4 nc -z -w2 "$host" "$port" 2>/dev/null
+  else
+    timeout 3 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null
+  fi
+}
+
+# Full tunnel test: spin up a temporary xray, curl ip-api.com through it.
+# Outputs latency_ms|country_code|normalised_json   OR   nothing on failure.
 test_node(){
   local node="$1" port="$2"
   local cfg="$AUX_DIR/test-$port.json" out="$AUX_LOG/test-$port.log"
@@ -130,9 +189,10 @@ json.dump(c,open(p,'w'))
 PY
   "$XRAY_BIN" run -c "$cfg" >"$out" 2>&1 & local pid=$!
   sleep .7
-  local t result country; t=$(date +%s%N)
-  # Primary probe through the node; fall back to a second endpoint so a
-  # single blocked geo-API cannot reject every config (runner egress varies).
+  local t result country
+  t=$(date +%s%N)
+  # Probe through the node → ip-api.com gives us exit-country + confirms the
+  # node actually routes traffic.
   result=$(curl -fsS --max-time "$HEALTH_TIMEOUT" --proxy "socks5h://127.0.0.1:$port" 'http://ip-api.com/json?fields=countryCode' 2>/dev/null || true)
   [[ -n "$result" ]] || result=$(curl -fsS --max-time "$HEALTH_TIMEOUT" --proxy "socks5h://127.0.0.1:$port" 'https://api.ipify.org?format=json' 2>/dev/null || true)
   local elapsed=$((($(date +%s%N)-t)/1000000))
@@ -142,41 +202,8 @@ PY
   printf '%s|%s|%s\n' "$elapsed" "$country" "$node"
 }
 
-# Fast TCP pre-filter: connect to host:port with a short timeout. Cheaper than
-# booting xray for every candidate — a dead port is skipped before the full
-# tunnel test. Only nodes whose port accepts a connection proceed to test_node.
-# NOTE: this is a cheap heuristic only; the authoritative "config is alive"
-# check is test_node's full xray->socks->HTTP round trip, so a false positive
-# here can never leak a dead config into the pool.
-tcp_ping(){
-  local node="$1" host port
-  host=$(printf '%s' "$node" | python3 -c 'import sys,json; x=json.load(sys.stdin); print(x.get("host") or x.get("add") or "")' 2>/dev/null) || return 1
-  port=$(printf '%s' "$node" | python3 -c 'import sys,json; x=json.load(sys.stdin); print(int(x.get("port") or 443))' 2>/dev/null) || return 1
-  [[ -n "$host" ]] || return 1
-  if command -v nc >/dev/null 2>&1; then
-    timeout 4 nc -z -w2 "$host" "$port" 2>/dev/null
-  else
-    # Fallback: bash /dev/tcp (reports success on hung SYN — nc is preferred)
-    timeout 3 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null
-  fi
-}
-
-sub_name(){ python3 - "$1" <<'PY'
-import sys,urllib.parse,re
-u=urllib.parse.urlparse(sys.argv[1]); h=u.hostname or 'source'; print(re.sub(r'[^A-Za-z0-9._-]+','-',h)[:32])
-PY
-}
-
+# ─── Source loading ────────────────────────────────────────────────────────────
 load_urls(){
-  # Match proxy.sh semantics: the built-in DEFAULT_EXTERNAL_SUB is used ONLY
-  # when the user has not supplied their own EXTERNAL_SUB_URLS. If they have,
-  # use exactly those — otherwise the default always gets merged in on top and
-  # the user's machine ends up with far more than BEST_PER_SUB nodes per sub.
-  #
-  # The worker's /api/subs KV list is NOT consulted here. That store can hold
-  # up to MAX_SUBS=20 subs accumulated over time; pulling them all in would
-  # merge dozens of unrelated sources and blow past the BEST_PER_SUB cap per
-  # user-supplied sub. The source list is explicitly EXTERNAL_SUB_URLS only.
   if [[ -z "${EXTERNAL_SUB_URLS:-}" ]]; then
     printf '%s\n' "$DEFAULT_EXTERNAL_SUB"
   else
@@ -184,155 +211,7 @@ load_urls(){
   fi
 }
 
-# Re-test only the currently-included pool (no source refetch). Runs every
-# HEALTH_INTERVAL (default 20 min). Updates per-node latency/country and drops
-# a node only after MAX_CONSEC_FAIL consecutive failed probes — so a transient
-# blip never yanks a working config out of rotation.
-health_only(){
-  [[ -s "$POOL_FILE" ]] || { log "pool empty; waiting for a source refresh"; return 0; }
-  local -a kept=() rej=()
-  local port=$((21000))
-  while IFS=$'\t' read -r name latency country node; do
-    [[ -n "$name" && -n "$node" ]] || continue
-    local res
-    res=$(test_node "$node" "$port" || true); port=$((port+1))
-    if [[ -n "$res" ]]; then
-      # latest latency|country from the live probe; keep name + node as-is
-      local nl nc
-      IFS='|' read -r nl nc _ <<< "$res"
-      kept+=("$name|$nl|$nc|$node")
-      update_state "$node" 0
-    else
-      # Full tunnel test failed from the runner. This is often runner-egress,
-      # not proof the node is dead for the user (the GitHub runner frequently
-      # cannot complete reality/ws tunnel round-trips to regional nodes that
-      # DO work from Iran). If the host:port is STILL TCP-alive, keep it and
-      # reset the failure counter — mirroring refresh_sources' TCP-alive
-      # fallback so a working-for-the-user node is never dropped from rotation
-      # just because OUR runner can't full-test it.
-      if tcp_ping "$node"; then
-        update_state "$node" 0
-        kept+=("$name|$latency|$country|$node")
-      elif bump_fail "$node"; then
-        rej+=("$name|$node")
-      else
-        # Not yet at the drop threshold — keep it one more cycle (don't interrupt).
-        kept+=("$name|$latency|$country|$node")
-      fi
-    fi
-  done < "$POOL_FILE"
-  : > "$POOL_FILE"
-  for row in "${kept[@]}"; do
-    IFS='|' read -r name lat c node <<< "$row"
-    printf '%s\t%s\t%s\t%s\n' "$name" "$lat" "$c" "$node" >> "$POOL_FILE"
-  done
-  for row in "${rej[@]}"; do IFS='|' read -r name node <<< "$row"; log "dropped (${MAX_CONSEC_FAIL} consecutive fails): $name ${node:0:40}"; done
-  log "health pass: ${#kept[@]} remain in pool"
-  finalize
-}
-
-# Refetch every external sub, health-test a fresh batch of candidates, and merge
-# the results into the pool — keeping the currently-working nodes and only
-# swapping in newly-found working configs when they beat (or replace) a worse
-# or dead one. Per sub we hold at most BEST_PER_SUB configs, ordered by latency.
-refresh_sources(){
-  local -a kept=()
-  local index=0 url name content line node result
-  declare -A seen=()
-  # Seed with every currently-active pool row so a source that is briefly
-  # unreachable never wipes the working set. (5th field = existing flag)
-  if [[ -s "$POOL_FILE" ]]; then
-    while IFS=$'\t' read -r name latency country node; do
-      [[ -n "$name" && -n "$node" ]] && kept+=("$name|$latency|$country|$node|1")
-    done < "$POOL_FILE"
-  fi
-  while IFS= read -r url; do
-    [[ -z "$url" || -n "${seen[$url]:-}" ]] && continue
-    seen[$url]=1; name=$(sub_name "$url")
-    content=$(fetch_sub "$url" || true)
-    [[ -n "$content" ]] || { warn "No nodes from $url (keeping existing pool)"; continue; }
-    local -a nodes=() good=()
-    while IFS= read -r line; do
-      node=$(normalise "$line" 2>/dev/null || true); [[ -n "$node" ]] || continue
-      nodes+=("$node")
-      (( ${#nodes[@]} >= 120 )) && break
-    done <<< "$content"
-    for node in "${nodes[@]}"; do
-      # Fast TCP pre-filter: skip dead hosts before the expensive xray probe.
-      tcp_ping "$node" || continue
-      # Full tunnel test ranks the config. The GitHub US runner often CANNOT
-      # complete reality/ws tunnel tests to regional nodes that DO work for the
-      # user (in Iran) — a failure here is runner-egress, not proof of a dead
-      # server. So: full-test passers carry real latency; TCP-alive-but-failed
-      # survivors still make the pool with a heavy latency penalty so they only
-      # fill slots when no full passers exist, and the user's client can test
-      # them from their own network.
-      result=$(test_node "$node" $((22000+index)) || true); index=$((index+1))
-      if [[ -n "$result" ]]; then
-        good+=("$result")
-      else
-        # TCP-alive but full test failed from the runner — keep with a penalty.
-        # (Cheap heuristic; a real-header geo-API cannot reject every config.)
-        good+=("$((HEALTH_TIMEOUT*1000+10000))|??|${node}")
-      fi
-    done
-    # Add this sub's new working candidates to the merge list.
-    for r in "${good[@]}"; do kept+=("$name|$r|0"); done
-    log "$name: ${#good[@]} fresh working candidates (pool merge keeps up to $BEST_PER_SUB/sub)"
-  done < <(load_urls)
-  # Write candidate rows to a temp file and let select_pool read it (a heredoc
-  # owns python stdin, so data must travel by file, not pipe).
-  local cand="$AUX_DIR/.merge-cands.tsv"
-  printf '%s\n' "${kept[@]}" > "$cand"
-  select_pool "$cand"
-  rm -f "$cand"
-  finalize
-}
-
-# Merge all rows (existing pool first, then fresh candidates), then per sub keep
-# the BEST_PER_SUB fastest working configs. Existing active nodes win latency
-# ties so we don't churn a working exit for an equal one.
-select_pool(){
-  python3 - "$POOL_FILE" "$BEST_PER_SUB" "$1" <<'PY'
-import sys,collections
-p,limit,cand=sys.argv[1],int(sys.argv[2]),sys.argv[3]
-subs=collections.defaultdict(list)
-for line in open(cand,errors='ignore'):
- if not line.strip(): continue
- a=line.rstrip('\n').split('|')
- if len(a)!=4 and len(a)!=5: continue
- if len(a)==5:
-  sub,lat,country,node,existing=a
- else:
-  sub,lat,country,node=a; existing='0'
- subs[sub].append((int(lat), country, node, int(existing)))
-out=[]
-for sub,entries in subs.items():
- # sort by (latency, prefer-existing) => existing wins ties
- entries.sort(key=lambda r:(r[0], 0 if r[3] else 1))
- # Dedupe by host (ignoring port) so one server can't fill several slots.
- seen_hosts=set(); keep=[]
- for lat,country,node,existing in entries:
-  try:
-   import json as _j
-   host=_j.loads(node).get('host') or _j.loads(node).get('add')
-  except Exception:
-   host=None
-  if host:
-   hk=host.lower()
-   if hk in seen_hosts: continue
-   seen_hosts.add(hk)
-  keep.append((lat,country,node))
- for lat,country,node in keep[:limit]:
-  out.append((sub,lat,country,node))
-with open(p,'w') as f:
- for sub,lat,country,node in out:
-  f.write('%s\t%s\t%s\t%s\n'%(sub,lat,country,node))
-print('pool:',len(out),'configs across',len(subs),'subs')
-PY
-}
-
-# Persist/read consecutive-failure counters for pooled nodes.
+# ─── Consecutive-failure state ────────────────────────────────────────────────
 update_state(){ python3 - "$POOL_STATE" "$1" "$2" <<'PY'
 import sys,json,os
 p,node,ok=sys.argv[1],sys.argv[2],sys.argv[3]
@@ -360,48 +239,313 @@ json.dump(st,open(p,'w'))
 PY
 }
 
-finalize(){ write_health_json; write_merged_sub; write_rotate_config; }
-
-write_health_json(){
-  local rotate_state="${AUX_DIR}/rotate-state.json"
-  local rotate_config="${AUX_DIR}/rotate2min.json"
-  python3 - "$POOL_FILE" "$AUX_DIR/health.json" "$rotate_state" "$rotate_config" <<'PY'
-import sys,json,datetime,collections,os
-p,out,rs_path,rc_path=sys.argv[1:]
-d=collections.defaultdict(list)
-for line in open(p,errors='ignore'):
- parts=line.rstrip('\n').split('\t')
- if len(parts)==4: d[parts[0]].append({'latencyMs':int(parts[1]),'country':parts[2]})
-rotation={}
-if os.path.exists(rs_path):
- try: rotation=json.load(open(rs_path))
- except Exception: pass
-rotation.setdefault('tag','')
-rotation.setdefault('country','')
-rotation.setdefault('host','')
-rotation['algo']='rotate2min'
-rotation['intervalSec']=int(os.environ.get('ROTATE2MIN_INTERVAL','120'))
-if os.path.exists(rc_path):
- try:
-  rc=json.load(open(rc_path))
-  rotation['routingRule']=rc.get('routing',{}).get('rules',[{}])[0].get('outboundTag','')
- except Exception: pass
-result={'checkedAt':datetime.datetime.utcnow().isoformat()+'Z','sources':d,'rotation':rotation}
-json.dump(result,open(out,'w'),ensure_ascii=False,indent=2)
+# ─── Leaderboard (per-sub top 10, JSON) ───────────────────────────────────────
+# Read the leaderboard dict from disk.  Returns an empty dict if missing.
+read_leaderboard(){
+  python3 - "$LEADERBOARD" <<'PY'
+import sys,json,os
+p=sys.argv[1]
+if os.path.exists(p):
+ try: print(json.dumps(json.load(open(p)))); raise SystemExit
+ except: pass
+print('{}')
 PY
-  if [[ -n "$WORKER_URL" ]]; then
-    curl -fsS --max-time 10 -X POST -H "Content-Type: application/json" -H "x-gayroxy-token: $API_TOKEN" --data-binary @"$AUX_DIR/health.json" "$WORKER_URL/api/health" >/dev/null 2>&1 || true
+}
+
+# Insert a candidate into the per-sub leaderboard.
+# $1=subscription_name  $2=latency_ms  $3=country  $4=normalised_json
+leaderboard_insert(){
+  python3 - "$LEADERBOARD" "$1" "$2" "$3" "$4" <<'PY'
+import sys,json,os,bisect
+lb_path,sub,lat,country,node=sys.argv[1:]; lat=int(lat)
+lb={}
+if os.path.exists(lb_path):
+ try: lb=json.load(open(lb_path))
+ except: pass
+entries=lb.get(sub,[])
+
+# Resolve the new node's host for dedupe
+skip=False
+try:
+ n=json.loads(node); host=(n.get('host') or n.get('add') or '').lower(); proto=n.get('_proto','?')
+except Exception:
+ skip=True
+if not skip and host:
+    # Drop any existing entry with the same host+proto (a faster clone replaces it).
+    # If an existing entry with the same host+proto is EQUAL-or-better, skip insert.
+    removed=[]
+    for e in entries:
+        try:
+            en=json.loads(e['node']); eh=(en.get('host') or en.get('add') or '').lower()
+        except Exception: continue
+        if eh==host and en.get('_proto')==proto:
+            if e['latency']<=lat:
+                skip=True
+                break
+            removed.append(e)
+    if not skip:
+        lb[sub]=[e for e in entries if e not in removed]
+        entries=lb.get(sub,[])
+
+if skip:
+    json.dump(lb, open(lb_path,'w'), ensure_ascii=False, indent=2)
+    raise SystemExit(0)
+
+# Insert in sorted position (lowest latency first)
+keys=[e['latency'] for e in entries]
+pos=bisect.bisect_left(keys, lat)
+entries.insert(pos, {'latency':lat, 'country':country, 'node':node})
+# Cap at BEST_PER_SUB equivalent (hard 10; the per-sub cap is enforced by
+# BEST_PER_SUB at pool-build time)
+if len(entries)>10: entries=entries[:10]
+lb[sub]=entries
+os.makedirs(os.path.dirname(lb_path) or '.', exist_ok=True)
+json.dump(lb, open(lb_path,'w'), ensure_ascii=False, indent=2)
+PY
+}
+
+# ─── Parallel health probe ─────────────────────────────────────────────────────
+# Test up to PARALLEL_PROBES nodes concurrently.  Each probe writes
+# latency|country|node_json to a temp file; we collect them after all finish.
+# $1 = subscription name, $2+ = node json strings
+parallel_test(){
+  local sub="$1"; shift
+  local -a nodes=("$@")
+  local total=${#nodes[@]}
+  [[ $total -eq 0 ]] && return 0
+
+  local tmp_dir="$AUX_DIR/.health-$$"
+  mkdir -p "$tmp_dir"
+  local port_base=$((21000 + RANDOM % 1000))
+
+  # Launch all probes concurrently via probe-node.sh (standalone — no parent
+  # functions needed). xargs -P caps at PARALLEL_PROBES. Each probe writes
+  # latency|country|node_json to stdout; we collect after all finish.
+  # shellcheck disable=SC2097,SC2098  # env prefix intentionally reaches xargs children
+  printf '%s\n' "${nodes[@]}" | \
+    PARALLEL_PROBES=$PARALLEL_PROBES XRAY_BIN="$XRAY_BIN" AUX_DIR="$AUX_DIR" \
+    AUX_LOG="$AUX_LOG" HEALTH_TIMEOUT="$HEALTH_TIMEOUT" PORT_BASE=$port_base \
+    xargs -I{} -P "$PARALLEL_PROBES" \
+    bash "$ROOT/scripts/agent/probe-node.sh" {} \
+    > "$tmp_dir/probe-out" 2>/dev/null || true
+
+  # Update leaderboard with results
+  while IFS='|' read -r rl rc rn; do
+    [[ -n "$rn" ]] || continue
+    leaderboard_insert "$sub" "$rl" "$rc" "$rn" 2>/dev/null || true
+  done < "$tmp_dir/probe-out"
+
+  # Report
+  local pass
+  pass=$(wc -l < "$tmp_dir/probe-out" 2>/dev/null || echo 0)
+  local dead=$((total - pass))
+  rm -rf "$tmp_dir"
+  if [[ $dead -gt 0 ]]; then
+    log "$sub: $pass/$total alive, $dead dead (leaderboard top 10 maintained)"
+  else
+    log "$sub: $pass/$total alive, all passing"
   fi
 }
 
+# ─── Health-only cycle (re-test existing pool, 10-at-a-time parallel) ──────────
+health_only(){
+  [[ -s "$POOL_FILE" ]] || { log "pool empty; waiting for a source refresh"; return 0; }
+
+  # Collect all nodes per sub for batch parallel testing
+  declare -A sub_nodes=()
+  declare -A sub_pool=()   # sub → "lat|country|node" for existing pool rows
+  while IFS=$'\t' read -r name latency country node; do
+    [[ -n "$name" && -n "$node" ]] || continue
+    sub_nodes["$name"]+="${node}"$'\n'
+    sub_pool["$name"]+="${latency}|${country}|${node}"$'\n'
+  done < "$POOL_FILE"
+
+  local -a kept_rows=()
+  local total=0 rej=0
+  declare -A alive_hosts=()
+
+  for sub in "${!sub_nodes[@]}"; do
+    local -a nodes=()
+    while IFS= read -r n; do
+      [[ -n "$n" ]] && nodes+=("$n")
+    done <<< "${sub_nodes[$sub]}"
+    [[ ${#nodes[@]} -eq 0 ]] && continue
+    total=$((total + ${#nodes[@]}))
+
+    # One parallel pass (10 at a time). parallel_test probes all nodes through
+    # ip-api.com and updates the leaderboard with fresh latency/country.
+    parallel_test "$sub" "${nodes[@]}"
+
+    # The fresh leaderboard top-10 for this sub = surviving, latency-sorted set.
+    # A node that full-test passed is in it; one that failed is not.
+    local lb_entries
+    lb_entries=$(python3 - "$LEADERBOARD" "$sub" <<'PY'
+import sys,json
+lb,sub=sys.argv[1:]
+try: d=json.load(open(lb))
+except: d={}
+for e in d.get(sub,[]):
+ print("%s\t%s\t%s\t%s" % (sub,e['latency'],e['country'],e['node']))
+PY
+    )
+
+    # Track hosts that came back alive so we can tell "pool node failed" from
+    # "replaced". Use host as the dedupe key.
+    while IFS=$'\t' read -r lsub llat lcountry lnode; do
+      [[ -n "$lnode" ]] || continue
+      local lbhost
+      lbhost=$(printf '%s' "$lnode" | python3 -c 'import sys,json; x=json.load(sys.stdin); print((x.get("host") or x.get("add") or "").lower())' 2>/dev/null)
+      [[ -n "$lbhost" ]] && alive_hosts["$lbhost"]=1
+      kept_rows+=("$lsub|$llat|$lcountry|$lnode")
+    done <<< "$lb_entries"
+
+    # Now decide fate of the OLD pool rows: if their host came back alive keep;
+    # if it disappeared (probe failed), apply MAX_CONSEC_FAIL drop logic.
+    while IFS=$'\t' read -r lname llat lcountry lnode; do
+      [[ -n "$lnode" ]] || continue
+      local oldhost
+      oldhost=$(printf '%s' "$lnode" | python3 -c 'import sys,json; x=json.load(sys.stdin); print((x.get("host") or x.get("add") or "").lower())' 2>/dev/null)
+      if [[ -n "$oldhost" && -n "${alive_hosts[$oldhost]:-}" ]]; then
+        # Alive via the parallel pass — already counted above; ensure success state
+        update_state "$lnode" 0
+        continue
+      fi
+      # Not alive in this pass: TCP check for the runner-egress false-negative case
+      if tcp_ping "$lnode"; then
+        update_state "$lnode" 0
+        # It may have been dropped from the top-10 by faster new nodes; keep its
+        # old latency so it can re-enter if not already present.
+        if [[ -z "${alive_hosts[$oldhost]:-}" ]]; then
+          kept_rows+=("$lname|$llat|$lcountry|$lnode")
+        fi
+      elif bump_fail "$lnode"; then
+        rej=$((rej + 1))
+        log "dropped (${MAX_CONSEC_FAIL} consecutive fails): $lname ${lnode:0:40}"
+      else
+        # Not yet at drop threshold — carry forward
+        if [[ -z "${alive_hosts[$oldhost]:-}" ]]; then
+          kept_rows+=("$lname|$llat|$lcountry|$lnode")
+        fi
+      fi
+    done <<< "${sub_pool[$sub]}"
+  done
+
+  # Rebuild pool.tsv from the kept set
+  : > "$POOL_FILE"
+  for row in "${kept_rows[@]}"; do
+    IFS='|' read -r name lat c node <<< "$row"
+    printf '%s\t%s\t%s\t%s\n' "$name" "$lat" "$c" "$node" >> "$POOL_FILE"
+  done
+
+  if [[ $rej -gt 0 ]]; then
+    log "health pass: ${#kept_rows[@]} in pool ($total probed parallel, $rej dropped)"
+  else
+    log "health pass: ${#kept_rows[@]} in pool, all alive (parallel, ${PARALLEL_PROBES} concurrent)"
+  fi
+  finalize
+}
+
+# ─── Full source refresh (parallel 10-at-a-time) ──────────────────────────────
+refresh_sources(){
+  declare -A seen=()
+
+  # Seed leaderboard with existing pool entries (so unreachable subs don't wipe the set)
+  if [[ -s "$POOL_FILE" ]]; then
+    while IFS=$'\t' read -r name latency country node; do
+      [[ -n "$name" && -n "$node" ]] || continue
+      leaderboard_insert "$name" "$latency" "$country" "$node" 2>/dev/null || true
+    done < "$POOL_FILE"
+  fi
+
+  while IFS= read -r url; do
+    [[ -z "$url" || -n "${seen[$url]:-}" ]] && continue
+    seen[$url]=1; local name; name=$(sub_name "$url")
+    local content; content=$(fetch_sub "$url" || true)
+    [[ -n "$content" ]] || { warn "No nodes from $url (keeping existing pool)"; continue; }
+
+    local -a nodes=()
+    while IFS= read -r line; do
+      local node; node=$(normalise "$line" 2>/dev/null || true); [[ -n "$node" ]] || continue
+      nodes+=("$node")
+      (( ${#nodes[@]} >= 120 )) && break
+    done <<< "$content"
+
+    # TCP pre-filter: skip dead hosts before the expensive xray probe
+    local -a good_nodes=()
+    for node in "${nodes[@]}"; do
+      tcp_ping "$node" || continue
+      good_nodes+=("$node")
+    done
+    log "$name: ${#good_nodes[@]}/${#nodes[@]} passed TCP pre-filter"
+
+    # Run parallel health probes (10 at a time) for this sub
+    parallel_test "$name" "${good_nodes[@]}"
+
+    # Also mark TCP-alive-but-full-test-failed nodes with a penalty in the leaderboard
+    for node in "${nodes[@]}"; do
+      tcp_ping "$node" || continue
+      # Check if this node is already in the leaderboard (parallel_test would have added it)
+      local already_in
+      already_in=$(python3 - "$LEADERBOARD" "$name" "$node" <<'PY'
+import sys,json,urllib.parse
+lb,sub,node=sys.argv[1:]
+lb=json.load(open(lb)) if __import__('os').path.exists(lb) else {}
+try:
+ n=json.loads(node); host=(n.get('host') or n.get('add') or '').lower()
+ for e in lb.get(sub,[]):
+  en=json.loads(e['node']); eh=(en.get('host') or en.get('add') or '').lower()
+  if eh==host: print('1'); raise SystemExit
+except: pass
+print('0')
+PY
+      )
+      if [[ "$already_in" == "0" ]]; then
+        # Not in leaderboard yet — add with heavy penalty so it only fills empty slots
+        leaderboard_insert "$name" "$((HEALTH_TIMEOUT*1000+10000))" "??" "$node" 2>/dev/null || true
+      fi
+    done
+  done < <(load_urls)
+
+  # Rebuild pool.tsv from leaderboard
+  rebuild_pool_from_leaderboard
+  finalize
+}
+
+# ─── Pool rebuild from leaderboard ─────────────────────────────────────────────
+# Reads pool-leaderboard.json, keeps BEST_PER_SUB per sub (deduped by host),
+# and writes the flat pool.tsv.
+rebuild_pool_from_leaderboard(){
+  python3 - "$LEADERBOARD" "$POOL_FILE" "$BEST_PER_SUB" <<'PY'
+import sys,json,collections
+lb_path,out_path,limit=sys.argv[1],sys.argv[2],int(sys.argv[3])
+lb={}
+try: lb=json.load(open(lb_path))
+except: pass
+lines=[]
+seen_hosts=set()
+for sub,entries in lb.items():
+ count=0
+ for e in entries:
+  if count>=limit: break
+  node=e.get('node','')
+  try:
+   n=json.loads(node); host=(n.get('host') or n.get('add') or '').lower()
+   if host and host in seen_hosts: continue
+   if host: seen_hosts.add(host)
+  except: pass
+  lines.append('%s\t%s\t%s\t%s' % (sub, e['latency'], e['country'], node))
+  count+=1
+with open(out_path,'w') as f: f.write('\n'.join(lines)+'\n' if lines else '')
+total=sum(len(v) for v in lb.values())
+print('pool: %d configs across %d subs (leaderboard total: %d entries)' % (len(lines), len(lb), total))
+PY
+}
+
+# ─── Merge subscription output ─────────────────────────────────────────────────
 write_merged_sub(){
   [[ -s "${SUB_DIR}/subscription.b64" ]] || return 0
   local base; base=$(base64 -d "${SUB_DIR}/subscription.b64" 2>/dev/null || true)
   [[ -n "$base" ]] || return 0
-  # Build the final public subscription: the Gayroxy-native configs from the
-  # current subscription PLUS the health agent's capped (BEST_PER_SUB/sub)
-  # external pool. Any previously-merged "External-*" links are dropped so a
-  # stale uncapped external section never leaks back in.
   python3 - "$POOL_FILE" "$base" <<'PY' > "$SUB_DIR/external-healthy.txt"
 import sys,json,urllib.parse,base64,re
 p,b64=sys.argv[1:]
@@ -418,14 +562,10 @@ def is_external(line):
         except Exception: pass
     return False
 flags=lambda c: ''.join(chr(127397+ord(x)) for x in c.upper()) if len(c)==2 else '🌐'
-
-# Track best 10 per external sub by latency
 from collections import defaultdict
 ext_groups = defaultdict(list)
-
-# First pass: collect all external configs with their latency
 for line in open(p,errors='ignore'):
-    a=line.rstrip('\n').split('\t');
+    a=line.rstrip('\n').split('\t')
     if len(a)!=4: continue
     sub,lat,c,node=a
     lat=int(lat)
@@ -433,25 +573,15 @@ for line in open(p,errors='ignore'):
     proto=x['_proto']
     host=x.get('host') or x.get('add')
     port=x.get('port',443)
-    ext_groups[sub].append({
-        'latency': lat, 'country': c, 'proto': proto,
-        'host': host, 'port': port, 'node': node
-    })
-
-# Keep top 10 per external sub by latency (lowest first)
+    ext_groups[sub].append({'latency':lat,'country':c,'proto':proto,'host':host,'port':port,'node':node})
 kept = []
 for sub, configs in ext_groups.items():
     configs.sort(key=lambda c: c['latency'])
     for idx, cfg in enumerate(configs[:10], 1):
         cfg['index'] = idx
         kept.append((sub, cfg))
-
-# Output non-external native configs first
 for line in lines:
-    if not is_external(line):
-        print(line)
-
-# Then output kept external configs with latency in remark
+    if not is_external(line): print(line)
 for sub, cfg in kept:
     lat=cfg['latency']; c=cfg['country']; proto=cfg['proto']
     host=cfg['host']; port=cfg['port']; idx=cfg['index']
@@ -462,9 +592,6 @@ for sub, cfg in kept:
         raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode()
         link='vmess://'+base64.b64encode(raw).decode()
     else:
-        # Rebuild the URL preserving EVERY param needed for the protocol —
-        # especially Reality (pbk/sid/fp/flow), without which the client cannot
-        # handshake and the config is dead in nekobox.
         u=urllib.parse.quote(x.get('user',''),safe='')
         q={'type':x.get('type','tcp'),'security':x.get('security','')}
         if x.get('path'): q['path']=x['path']
@@ -476,17 +603,13 @@ for sub, cfg in kept:
         if x.get('fp'): q['fp']=x['fp']
         if x.get('method'): q['method']=x['method']
         query=urllib.parse.urlencode(q)
-        scheme=proto
-        link=f'{scheme}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
+        link=f'{proto}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
     print(link)
 PY
   cat "$SUB_DIR/external-healthy.txt" | base64 -w0 > "$SUB_DIR/subscription.b64"
   push_sub
 }
 
-# Push the freshly-merged public subscription to the Worker KV so /sub reflects
-# the health agent's capped external pool (deploy-cf.sh only uploads at render
-# time; without this the served sub never updates after boot).
 push_sub(){
   [[ -s "$SUB_DIR/subscription.b64" ]] || return 0
   [[ -n "${WORKER_URL:-}" ]] || return 0
@@ -498,15 +621,52 @@ push_sub(){
     && log "Pushed merged subscription to KV" 2>/dev/null || true
 }
 
-write_rotate_config(){
-  # Country of the runner itself (the main Gayroxy exit) for the pool-main entry.
-  local main_country
-  main_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null || echo '??')
-  python3 - "$POOL_FILE" "$ROTATE_CONFIG" "$ROTATE_META" "$ROTATE_STATE" "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}" <<'PY'
+# ─── Health JSON report ────────────────────────────────────────────────────────
+write_health_json(){
+  python3 - "$POOL_FILE" "$AUX_DIR/health.json" "$LEADERBOARD" <<'PY'
+import sys,json,datetime,collections,os
+p,out,lb_path=sys.argv[1:]
+d=collections.defaultdict(list)
+for line in open(p,errors='ignore'):
+ parts=line.rstrip('\n').split('\t')
+ if len(parts)==4: d[parts[0]].append({'latencyMs':int(parts[1]),'country':parts[2]})
+# Per-sub leaderboard summary
+lb={}
+try: lb=json.load(open(lb_path))
+except: pass
+lb_summary={}
+for sub,entries in lb.items():
+ lb_summary[sub]={'topConfigs':[{'latencyMs':e['latency'],'country':e['country']} for e in entries[:10]]}
+result={'checkedAt':datetime.datetime.utcnow().isoformat()+'Z','sources':d,'leaderboard':lb_summary}
+json.dump(result,open(out,'w'),ensure_ascii=False,indent=2)
+PY
+  if [[ -n "$WORKER_URL" ]]; then
+    curl -fsS --max-time 10 -X POST -H "Content-Type: application/json" -H "x-gayroxy-token: $API_TOKEN" --data-binary @"$AUX_DIR/health.json" "$WORKER_URL/api/health" >/dev/null 2>&1 || true
+  fi
+}
+
+# ─── Rotation config generation ────────────────────────────────────────────────
+# Generate an xray rotation config for a given interval + listen port.
+# $1 = interval_seconds, $2 = listen_port, $3 = output_config_path,
+# $4 = meta_output_path, $5 = state_output_path,
+# $6 = uuid, $7 = ws_path, $8 = main_country, $9 = main_host
+gen_rotate_config(){
+  # interval is a named parameter for readability; the actual delay lives in
+  # the loop's sleep. The listen port is embedded in the config below.
+  # shellcheck disable=SC2034
+  local interval="$1" port="$2" cfg_out="$3" meta_out="$4" state_out="$5"
+  local uuid="$6" ws_path="$7" main_country="$8" main_host="$9"
+
+  # Get runner's exit country via ip-api.com
+  local run_country
+  run_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null \
+    || echo '??')
+
+  python3 - "$POOL_FILE" "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$run_country" "$main_host" "$port" <<'PY'
 import sys,json
-pool,out,meta_path,state_path,uuid,path,main_country,main_host=sys.argv[1:]
+pool,out,meta_path,state_path,uuid,path,main_country,main_host,listen_port=sys.argv[1:]
 obs=[]; meta=[]
-# Main Gayroxy exit (this runner) is part of the rotation pool too.
 meta.append('pool-main\t%s\t%s' % (main_country, main_host))
 for n,line in enumerate(open(pool,errors='ignore')):
  a=line.rstrip('\n').split('\t')
@@ -514,10 +674,10 @@ for n,line in enumerate(open(pool,errors='ignore')):
  try:
   x=json.loads(a[3]); p=x['_proto']; host=x.get('host') or x.get('add'); port=int(x.get('port') or 443)
   meta.append('pool-%d\t%s\t%s' % (n, a[2], host))
-  stream={'network':x.get('type') or x.get('net') or 'tcp'}
+  stream={'network':x.get('type') or 'tcp'}
   net=stream['network']
   if net=='ws': stream['wsSettings']={'path':x.get('path') or '/','headers':{'Host':host}}
-  elif net=='grpc': stream['grpcSettings']={'serviceName':x.get('serviceName') or x.get('path') or ''}
+  elif net=='grpc': stream['grpcSettings']={'serviceName':x.get('serviceName') or ''}
   elif net=='httpupgrade': stream['httpupgradeSettings']={'path':x.get('path') or '/','host':host}
   if x.get('security')=='tls' or x.get('tls')=='tls': stream['security']='tls'; stream['tlsSettings']={'serverName':x.get('sni') or host,'fingerprint':x.get('fp') or 'chrome'}
   tag='pool-%d'%n
@@ -532,35 +692,21 @@ if not obs: obs=[{'tag':'pool-main','protocol':'freedom'}]
 else: obs.append({'tag':'pool-main','protocol':'freedom'})
 open(meta_path,'w').write('\n'.join(meta)+'\n')
 first=next((o['tag'] for o in obs if o['tag'].startswith('pool-')),'pool-main')
-c={'log':{'loglevel':'warning'},'inbounds':[{'tag':'rotate2min','listen':'127.0.0.1','port':10018,'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate2min'],'outboundTag':first}]}}
+c={'log':{'loglevel':'warning'},'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':first}]}}
 json.dump(c,open(out,'w'),indent=2)
-# Seed rotation state to the initial outbound so rotate_loop's first pick_next
-# never re-offers the node the config already points at (avoid a wasted first
-# rotation cycle when state.json is absent/empty).
-py_meta = {}
+# Seed rotation state
+py_meta={}
 for m in meta:
- parts = m.split('\t')
- if len(parts) == 3:
-  py_meta[parts[0]] = (parts[1], parts[2])
-seed = py_meta.get(first)
+ parts=m.split('\t')
+ if len(parts)==3: py_meta[parts[0]]=(parts[1],parts[2])
+seed=py_meta.get(first)
 if seed:
- json.dump({'tag': first, 'country': seed[0], 'host': seed[1]}, open(state_path, 'w'))
+ json.dump({'tag':first,'country':seed[0],'host':seed[1]},open(state_path,'w'))
 PY
-  if [[ -x "$XRAY_BIN" ]]; then
-    [[ -n "${AUX_ROTATE_PID:-}" ]] && kill "$AUX_ROTATE_PID" 2>/dev/null || true
-    "$XRAY_BIN" run -c "$ROTATE_CONFIG" >"$AUX_LOG/rotate2min.log" 2>&1 &
-    AUX_ROTATE_PID=$!
-    sleep .5
-    kill -0 "$AUX_ROTATE_PID" 2>/dev/null || warn "aux rotate2min xray failed to start"
-  else
-    AUX_ROTATE_PID=""
-    warn "aux rotate2min xray binary missing; skipping launch"
-  fi
 }
 
-# Pick the next rotation target. Hard rule: never the same node twice in a row;
-# prefer a different country AND a different host/datacenter, then relax step by step.
-pick_next(){ python3 - "$ROTATE_META" "$ROTATE_STATE" <<'PY'
+# ─── Pick next rotation target (shared logic) ─────────────────────────────────
+pick_next(){ python3 - "$1" "$2" <<'PY'
 import json,sys,os,random
 meta_path,state_path=sys.argv[1],sys.argv[2]
 meta={}
@@ -571,14 +717,12 @@ if not meta: raise SystemExit(1)
 state={}
 if os.path.exists(state_path):
  try: state=json.load(open(state_path))
- except Exception: state={}
+ except: state={}
 prev=state.get('tag'); pc=state.get('country'); ph=state.get('host')
 tags=list(meta)
 def pick(pred):
  c=[t for t in tags if t!=prev and pred(t)]
  return random.choice(c) if c else None
-# 1) different country + different datacenter  2) different datacenter
-# 3) any other node  4) single-node pool: keep current
 t=pick(lambda x: meta[x]['country']!=pc and meta[x]['host']!=ph) \
  or pick(lambda x: meta[x]['host']!=ph) \
  or pick(lambda x: True)
@@ -589,47 +733,123 @@ print(t)
 PY
 }
 
-rotate_loop(){
-  while :; do
-    sleep "$ROTATE2MIN_INTERVAL"
-    [[ -f "$ROTATE_CONFIG" && -f "$ROTATE_META" ]] || continue
-    local next prev
-    prev=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("routing",{}).get("rules",[{}])[0].get("outboundTag",""))' "$ROTATE_CONFIG" 2>/dev/null || true)
-    next=$(pick_next 2>/dev/null || true)
-    [[ -n "$next" ]] || continue
-    [[ "$next" == "$prev" ]] && { log "Rotate 2min: single-node pool, keeping $next"; continue; }
-    python3 - "$ROTATE_CONFIG" "$next" <<'PY'
-import json,sys
-p,tag=sys.argv[1:]; d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag; json.dump(d,open(p,'w'),indent=2)
-PY
-    # Restart only the aux xray so existing Rotate-2min connections migrate now.
-    # The main Gayroxy xray is never touched.
-    if [[ -n "${AUX_ROTATE_PID:-}" ]]; then kill "$AUX_ROTATE_PID" 2>/dev/null || true; fi
-    if [[ -x "$XRAY_BIN" ]]; then
-      "$XRAY_BIN" run -c "$ROTATE_CONFIG" >"$AUX_LOG/rotate2min.log" 2>&1 &
-      AUX_ROTATE_PID=$!
-    else
-      AUX_ROTATE_PID=""
-      warn "aux rotate2min xray binary missing; skipping restart"
-      sleep "$ROTATE2MIN_INTERVAL"
-      continue
-    fi
+# ─── Start an aux xray instance ───────────────────────────────────────────────
+start_aux_xray(){
+  local cfg="$1" logf="$2" pid_var="$3"
+  if [[ -x "$XRAY_BIN" ]]; then
+    [[ -n "${!pid_var:-}" ]] && kill "${!pid_var}" 2>/dev/null || true
+    "$XRAY_BIN" run -c "$cfg" >"$logf" 2>&1 &
+    eval "$pid_var=$!"
     sleep .5
-    kill -0 "$AUX_ROTATE_PID" 2>/dev/null || warn "aux rotate2min xray failed to restart"
-    log "Rotate 2min -> $next (aux xray only)"
+    kill -0 "${!pid_var}" 2>/dev/null || warn "aux xray ($cfg) failed to start"
+  else
+    eval "$pid_var=\"\""
+    warn "xray binary missing; skipping launch ($cfg)"
+  fi
+}
+
+# ─── Rotation loops (three tiers) ─────────────────────────────────────────────
+rotate_loop_1min(){
+  while :; do
+    sleep "$ROTATE1MIN_INTERVAL"
+    [[ -f "$ROTATE1MIN_CONFIG" && -f "$ROTATE1MIN_META" ]] || continue
+    local next; next=$(pick_next "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" 2>/dev/null || true)
+    [[ -n "$next" ]] || continue
+    python3 -c "
+import json,sys; p,tag=sys.argv[1],sys.argv[2]
+d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag
+json.dump(d,open(p,'w'),indent=2)
+" "$ROTATE1MIN_CONFIG" "$next"
+    start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" ROTATE1MIN_PID
+    log "Rotate 1min → $next"
   done
 }
 
+rotate_loop_2min(){
+  while :; do
+    sleep "$ROTATE2MIN_INTERVAL"
+    [[ -f "$ROTATE2MIN_CONFIG" && -f "$ROTATE2MIN_META" ]] || continue
+    local next; next=$(pick_next "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" 2>/dev/null || true)
+    [[ -n "$next" ]] || continue
+    python3 -c "
+import json,sys; p,tag=sys.argv[1],sys.argv[2]
+d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag
+json.dump(d,open(p,'w'),indent=2)
+" "$ROTATE2MIN_CONFIG" "$next"
+    start_aux_xray "$ROTATE2MIN_CONFIG" "$AUX_LOG/rotate2min.log" ROTATE2MIN_PID
+    log "Rotate 2min → $next"
+  done
+}
+
+rotate_loop_5min(){
+  while :; do
+    sleep "$ROTATE5MIN_INTERVAL"
+    [[ -f "$ROTATE5MIN_CONFIG" && -f "$ROTATE5MIN_META" ]] || continue
+    local next; next=$(pick_next "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" 2>/dev/null || true)
+    [[ -n "$next" ]] || continue
+    python3 -c "
+import json,sys; p,tag=sys.argv[1],sys.argv[2]
+d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag
+json.dump(d,open(p,'w'),indent=2)
+" "$ROTATE5MIN_CONFIG" "$next"
+    start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" ROTATE5MIN_PID
+    log "Rotate 5min → $next"
+  done
+}
+
+# ─── Write all three rotation configs ──────────────────────────────────────────
+write_all_rotate_configs(){
+  local main_country
+  main_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null \
+    || echo '??')
+
+  gen_rotate_config "$ROTATE1MIN_INTERVAL" 10030 "$ROTATE1MIN_CONFIG" "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" \
+    "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
+  gen_rotate_config "$ROTATE2MIN_INTERVAL" 10032 "$ROTATE2MIN_CONFIG" "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" \
+    "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
+  gen_rotate_config "$ROTATE5MIN_INTERVAL" 10034 "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
+    "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
+
+  # Launch all three aux xray instances
+  start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" ROTATE1MIN_PID
+  start_aux_xray "$ROTATE2MIN_CONFIG" "$AUX_LOG/rotate2min.log" ROTATE2MIN_PID
+  start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" ROTATE5MIN_PID
+}
+
+finalize(){
+  rebuild_pool_from_leaderboard
+  write_merged_sub
+  write_health_json
+  write_all_rotate_configs
+}
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
 main(){
   [[ -x "$XRAY_BIN" ]] || warn "xray binary not found; health checks will fail"
-  # First run: full source refresh so the pool is populated and the merged
-  # sub / rotate config are written before any rotation happens.
+  # First run: full source refresh so pool + leaderboard + rotation configs
+  # are all written before any rotation loop starts.
   refresh_sources
   if (( ONCE == 1 )); then log "One health cycle complete"; return 0; fi
-  rotate_loop & ROTATE_PID=$!
+
+# shellcheck disable=SC2034  # rotation-loop PIDs set here, used in cleanup()
+  # Launch three rotation loops in background
+  rotate_loop_1min &
+# shellcheck disable=SC2034
+  LOOP1MIN_PID=$!
+  rotate_loop_2min &
+# shellcheck disable=SC2034
+  LOOP2MIN_PID=$!
+  rotate_loop_5min &
+# shellcheck disable=SC2034
+  LOOP5MIN_PID=$!
+
+  log "Rotation loops started: 1min (port 10030), 2min (port 10032), 5min (port 10034)"
+  log "Parallel health probes: up to $PARALLEL_PROBES concurrent, ${HEALTH_TIMEOUT}s timeout"
+
   # Two-tier scheduler:
-  #  - every HEALTH_INTERVAL (20 min): re-health the included pool only
-  #  - every SUBS_REFRESH_INTERVAL (2 h): refetch sources and merge new configs
+  #  - every HEALTH_INTERVAL (20 min): parallel health-check the included pool
+  #  - every SUBS_REFRESH_INTERVAL (2 h): refetch sources + merge new configs
   local elapsed=0
   while :; do
     sleep "$HEALTH_INTERVAL"; elapsed=$((elapsed + HEALTH_INTERVAL))
