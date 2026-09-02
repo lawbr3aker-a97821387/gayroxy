@@ -252,7 +252,7 @@ graph TD
 ## 🔁 Reliability & Failover
 
 **Single-run policy (hard invariant):** the workflow uses a concurrency group
-(`gayroxy-deploy-v4`, `cancel-in-progress: true`) — at most **one** run is
+(`gayroxy-deploy-v5`, `cancel-in-progress: true`) — at most **one** run is
 in_progress at any time. A new run (push / schedule / dispatch / keepalive)
 cancels any older run the moment it starts, so there is never a dispatch storm
 or overlapping tunnels. Configs stay byte-identical across runs (deterministic

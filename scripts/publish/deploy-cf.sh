@@ -160,8 +160,11 @@ put_value() { # local_file kv_key
     log "KV: ${key} ← $(basename "$file") ($(du -h "$file" | cut -f1))"
 }
 
-SUB_DIR="${WORKDIR}/sub"
-GEO_DIR="${WORKDIR}/geo"
+# Honor an explicit SUB_DIR/GEO_DIR (workflow jobs download the render
+# artifact to repo-root sub/ and set SUB_DIR=$PWD/sub); fall back to the
+# script's own dir for standalone runs.
+SUB_DIR="${SUB_DIR:-${WORKDIR}/sub}"
+GEO_DIR="${GEO_DIR:-${WORKDIR}/geo}"
 if [[ ! -d "$SUB_DIR" ]]; then
     echo "ERROR: ${SUB_DIR} not found — run ./scripts/render/build-assets.sh (RENDER_ONLY=1) first, or use ./update-assets.sh." >&2
     exit 1

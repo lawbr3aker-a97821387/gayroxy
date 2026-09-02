@@ -5,8 +5,8 @@ concurrency:
   # GitHub cancel — termination is queued but never delivered until timeout)
   # wedges the group, bump to the next version so the newest dispatch starts
   # immediately. serve.sh's handover lock handles the momentary overlap.
-  # History: v1 → 33422909163, v2 → 33564083894, v3 → 33574439636.
-  group: gayroxy-deploy-v4
+  # History: v1 → 33422909163, v2 → 33564083894, v3 → 33574439636, v4 → 33575514430.
+  group: gayroxy-deploy-v5
   cancel-in-progress: true
 
 on:
@@ -143,6 +143,7 @@ jobs:
           # missing assets here — serve (if: always()) still boots and its
           # LIVE_DEPLOY publishes the correct live sub.
           if [[ -f sub/subscription.b64 ]]; then
+            export SUB_DIR="$PWD/sub"
             ./scripts/publish/deploy-cf.sh 2>&1
           else
             echo "render artifact missing sub/subscription.b64 — skipping pre-seed deploy (serve LIVE_DEPLOY will publish)."
