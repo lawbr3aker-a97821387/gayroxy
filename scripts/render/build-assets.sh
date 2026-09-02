@@ -366,10 +366,16 @@ export PORT_VLESS_HU PORT_TROJAN_HU PORT_VMESS_HU
 export PORT_SOCKS5 PORT_HTTP_PROXY
 export DOMAIN
 
-# Build DATA JSON for the panel template (all URL/credential vars)
-# shellcheck disable=SC2155
-export DATA=$(python3 -c "
-import json, os
+# Build DATA JSON for the panel template (all URL/credential vars).
+# SUB_B64 is the full merged subscription — too big for env/argv (E2BIG:
+# "Argument list too long" once it exceeds ARG_MAX). Read it from its file
+# instead of the environment, and do the substitution in python (no
+# envsubst exec with a bloated env).
+unset SUB_B64
+export DOMAIN
+python3 - "$SUB_DIR" <<'PY'
+import json, os, sys
+sub_dir = sys.argv[1]
 keys = [
     'VLESS_URL','TROJAN_URL','VMESS_URL','VLESS_GRPC_URL','TROJAN_GRPC_URL',
     'SS_URL','SS_WS_URL','SS_GRPC_URL','VMESS_GRPC_URL',
@@ -384,15 +390,20 @@ keys = [
     'GRPC_SERVICE_VLESS','GRPC_SERVICE_TROJAN',
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
-    'REALITY_PUBLIC','SUB_B64','DOMAIN','WORKER_URL','REALITY_SNI',
+    'REALITY_PUBLIC','DOMAIN','WORKER_URL','REALITY_SNI',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
     'ROTATE2MIN_URL','API_TOKEN',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
-print(json.dumps(d))
-")
-
-envsubst '${DATA} ${DOMAIN} ${WORKER_URL}' < templates/panel.html.tmpl > "${SUB_DIR}/panel.html"
+try:
+    d['SUB_B64'] = open(f'{sub_dir}/subscription.b64').read().strip()
+except OSError:
+    d['SUB_B64'] = ''
+data = json.dumps(d)
+tpl = open('templates/panel.html.tmpl').read()
+out = tpl.replace('${DATA}', data).replace('${DOMAIN}', os.environ.get('DOMAIN','')).replace('${WORKER_URL}', os.environ.get('WORKER_URL',''))
+open(f'{sub_dir}/panel.html', 'w').write(out)
+PY
 # ─── Final output ─────────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
