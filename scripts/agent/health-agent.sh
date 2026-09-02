@@ -399,6 +399,30 @@ PY
       kept_rows+=("$lsub|$llat|$lcountry|$lnode")
     done <<< "$lb_entries"
 
+    # Prune the leaderboard for this sub: only keep entries whose host was
+    # verified alive via ip-api this cycle.  Anything that failed the full test
+    # (or was evicted) is dropped so it never re-enters the published list.
+    local alive_str=""
+    for h in "${!alive_hosts[@]}"; do alive_str+="${h}|"; done
+    ALIVE_HOSTS="$alive_str" python3 - "$LEADERBOARD" "$sub" <<'PY'
+import sys,json,os
+lb_path,sub=sys.argv[1],sys.argv[2]
+lb={}
+if os.path.exists(lb_path):
+    try: lb=json.load(open(lb_path))
+    except: lb={}
+entries=lb.get(sub,[])
+alive=set()
+for h in os.environ.get('ALIVE_HOSTS','').split('|'):
+    if h: alive.add(h)
+out=[]
+for e in entries:
+    n=json.loads(e['node']); h=(n.get('host') or n.get('add') or '').lower()
+    if h in alive: out.append(e)
+lb[sub]=out
+json.dump(lb,open(lb_path,'w'),ensure_ascii=False,indent=2)
+PY
+
     # Now decide fate of the OLD pool rows: if their host came back alive keep;
     # if it disappeared (probe failed), apply MAX_CONSEC_FAIL drop logic.
     while IFS=$'\t' read -r lname llat lcountry lnode; do
@@ -481,29 +505,6 @@ refresh_sources(){
     # Run parallel health probes (10 at a time) for this sub
     parallel_test "$name" "${good_nodes[@]}"
 
-    # Also mark TCP-alive-but-full-test-failed nodes with a penalty in the leaderboard
-    for node in "${nodes[@]}"; do
-      tcp_ping "$node" || continue
-      # Check if this node is already in the leaderboard (parallel_test would have added it)
-      local already_in
-      already_in=$(python3 - "$LEADERBOARD" "$name" "$node" <<'PY'
-import sys,json,urllib.parse
-lb,sub,node=sys.argv[1:]
-lb=json.load(open(lb)) if __import__('os').path.exists(lb) else {}
-try:
- n=json.loads(node); host=(n.get('host') or n.get('add') or '').lower()
- for e in lb.get(sub,[]):
-  en=json.loads(e['node']); eh=(en.get('host') or en.get('add') or '').lower()
-  if eh==host: print('1'); raise SystemExit
-except: pass
-print('0')
-PY
-      )
-      if [[ "$already_in" == "0" ]]; then
-        # Not in leaderboard yet — add with heavy penalty so it only fills empty slots
-        leaderboard_insert "$name" "$((HEALTH_TIMEOUT*1000+10000))" "??" "$node" 2>/dev/null || true
-      fi
-    done
   done < <(load_urls)
 
   # Rebuild pool.tsv from leaderboard
@@ -748,6 +749,40 @@ start_aux_xray(){
   fi
 }
 
+# ─── Set a rotation target with a small request-level fallback chain ─────────
+# Rewrites the aux xray config so its rotate inbound routes through a balancer
+# led by $1 (the newly selected node), with up to $2 fallback nodes available so
+# a client whose primary node dies mid-interval transparently fails over instead
+# of getting an error.  Every node in the chain is an ip-api-verified pool node.
+set_rotate_target(){
+  local cfg="$1" lead="$2" fb_max="${3:-3}"
+  python3 - "$cfg" "$lead" "$fb_max" <<'PY'
+import sys,json
+cfg_path,lead,fb_max=sys.argv[1],sys.argv[2],int(sys.argv[3])
+d=json.load(open(cfg_path))
+obs=d.get('outbounds',[])
+tags=[o['tag'] for o in obs if isinstance(o.get('tag'),str) and o['tag'].startswith('pool-')]
+if not tags:
+    json.dump(d,open(cfg_path,'w'),indent=2); raise SystemExit
+# Order: lead first, then the rest (different host/country preferred at pick time).
+chain=[lead]+[t for t in tags if t!=lead]
+chain=chain[:1+fb_max]
+if lead not in chain: chain=[lead]+chain
+# Balancer led by `lead`, falling back across the rest of the chain.
+d.setdefault('routing',{})
+d['routing']['balancers']=[{'tag':'rotate-bal','selector':chain,'fallbackTag':lead}]
+# Point the rotate inbound through the balancer.
+rules=d['routing'].get('rules',[])
+for r in rules:
+    if r.get('inboundTag')==['rotate'] or r.get('inboundTag')=='rotate':
+        r.pop('outboundTag',None); r['balancerTag']='rotate-bal'
+        break
+else:
+    rules.append({'type':'field','inboundTag':['rotate'],'balancerTag':'rotate-bal'})
+json.dump(d,open(cfg_path,'w'),indent=2)
+PY
+}
+
 # ─── Rotation loops (three tiers) ─────────────────────────────────────────────
 rotate_loop_1min(){
   while :; do
@@ -755,13 +790,9 @@ rotate_loop_1min(){
     [[ -f "$ROTATE1MIN_CONFIG" && -f "$ROTATE1MIN_META" ]] || continue
     local next; next=$(pick_next "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" 2>/dev/null || true)
     [[ -n "$next" ]] || continue
-    python3 -c "
-import json,sys; p,tag=sys.argv[1],sys.argv[2]
-d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag
-json.dump(d,open(p,'w'),indent=2)
-" "$ROTATE1MIN_CONFIG" "$next"
+    set_rotate_target "$ROTATE1MIN_CONFIG" "$next"
     start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" ROTATE1MIN_PID
-    log "Rotate 1min → $next"
+    log "Rotate 1min → $next (with failover)"
   done
 }
 
@@ -771,13 +802,9 @@ rotate_loop_2min(){
     [[ -f "$ROTATE2MIN_CONFIG" && -f "$ROTATE2MIN_META" ]] || continue
     local next; next=$(pick_next "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" 2>/dev/null || true)
     [[ -n "$next" ]] || continue
-    python3 -c "
-import json,sys; p,tag=sys.argv[1],sys.argv[2]
-d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag
-json.dump(d,open(p,'w'),indent=2)
-" "$ROTATE2MIN_CONFIG" "$next"
+    set_rotate_target "$ROTATE2MIN_CONFIG" "$next"
     start_aux_xray "$ROTATE2MIN_CONFIG" "$AUX_LOG/rotate2min.log" ROTATE2MIN_PID
-    log "Rotate 2min → $next"
+    log "Rotate 2min → $next (with failover)"
   done
 }
 
@@ -787,13 +814,9 @@ rotate_loop_5min(){
     [[ -f "$ROTATE5MIN_CONFIG" && -f "$ROTATE5MIN_META" ]] || continue
     local next; next=$(pick_next "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" 2>/dev/null || true)
     [[ -n "$next" ]] || continue
-    python3 -c "
-import json,sys; p,tag=sys.argv[1],sys.argv[2]
-d=json.load(open(p)); d['routing']['rules'][0]['outboundTag']=tag
-json.dump(d,open(p,'w'),indent=2)
-" "$ROTATE5MIN_CONFIG" "$next"
+    set_rotate_target "$ROTATE5MIN_CONFIG" "$next"
     start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" ROTATE5MIN_PID
-    log "Rotate 5min → $next"
+    log "Rotate 5min → $next (with failover)"
   done
 }
 
@@ -805,11 +828,11 @@ write_all_rotate_configs(){
     || echo '??')
 
   gen_rotate_config "$ROTATE1MIN_INTERVAL" 10030 "$ROTATE1MIN_CONFIG" "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" \
-    "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
+    "${UUID_ROTATE1MIN:-}" "${PATH_ROTATE1MIN:-}" "$main_country" "${DOMAIN}"
   gen_rotate_config "$ROTATE2MIN_INTERVAL" 10032 "$ROTATE2MIN_CONFIG" "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" \
     "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
   gen_rotate_config "$ROTATE5MIN_INTERVAL" 10034 "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
-    "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
+    "${UUID_ROTATE5MIN:-}" "${PATH_ROTATE5MIN:-}" "$main_country" "${DOMAIN}"
 
   # Launch all three aux xray instances
   start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" ROTATE1MIN_PID

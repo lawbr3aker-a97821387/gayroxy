@@ -147,8 +147,12 @@ PATH_VLESS_HU="/$(derive_hex path/vless-hu 16)"
 PATH_TROJAN_HU="/$(derive_hex path/trojan-hu 16)"
 PATH_VMESS_HU="/$(derive_hex path/vmess-hu 16)"
 
+PATH_ROTATE1MIN="/$(derive_hex path/rotate1min 16)"
+UUID_ROTATE1MIN=$(derive_uuid uuid/rotate1min)
 PATH_ROTATE2MIN="/$(derive_hex path/rotate2min 16)"
 UUID_ROTATE2MIN=$(derive_uuid uuid/rotate2min)
+PATH_ROTATE5MIN="/$(derive_hex path/rotate5min 16)"
+UUID_ROTATE5MIN=$(derive_uuid uuid/rotate5min)
 
 # SECURITY: derive + EXPORT the Worker write token so deploy-cf.sh (Worker
 # binding) and health-agent.sh (push auth) always agree. Never bind a random
@@ -169,7 +173,7 @@ export XRAY_DIR GEO_DIR LOG_DIR SUB_DIR PORT_NGINX \
   PATH_VLESS PATH_TROJAN PATH_VMESS PATH_VLESS_GRPC PATH_TROJAN_GRPC \
   PATH_SS_WS PATH_SS_GRPC PATH_VMESS_GRPC \
   PATH_VLESS_HU PATH_TROJAN_HU PATH_VMESS_HU \
-  PATH_ROTATE2MIN UUID_ROTATE2MIN \
+  PATH_ROTATE1MIN UUID_ROTATE1MIN PATH_ROTATE2MIN UUID_ROTATE2MIN PATH_ROTATE5MIN UUID_ROTATE5MIN \
   GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN \
   GRPC_SERVICE_SS GRPC_SERVICE_VMESS \
   TROJAN_PASS SS_PASS \

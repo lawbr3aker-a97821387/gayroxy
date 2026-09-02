@@ -27,7 +27,12 @@ command -v curl >/dev/null || { echo "build-assets: curl required"; exit 1; }
 command -v python3 >/dev/null || { echo "build-assets: python3 required"; exit 1; }
 
 export RENDER_ONLY=1
-export HEALTH_AGENT=0
+# The external pool is OWNED by the health agent (in serve.sh): it probes every
+# config and emits only the best-working per sub.  Render must NOT merge the raw
+# (uncapped) external sub here — that would leak all configs into the public sub
+# regardless of health.  subscription.b64 therefore carries only the default
+# Gayroxy configs; the serve job's agent appends the capped, verified externals.
+export HEALTH_AGENT=1
 # RENDER-only mode never starts services/tunnel/WARP (matches proxy.sh RENDER_ONLY).
 export WARP_ACTIVE=false WARP_BIN="" CLOUDFLARED_BIN=""
 
@@ -138,7 +143,9 @@ else
 fi
 
 ENC_PATH_VLESS=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_VLESS}")
+ENC_PATH_ROTATE1MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE1MIN}")
 ENC_PATH_ROTATE2MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE2MIN}")
+ENC_PATH_ROTATE5MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE5MIN}")
 ENC_PATH_TROJAN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_TROJAN}")
 
 # Detect runner country for config remarks (e.g. 🇩🇪-VLESS-WS)
@@ -175,7 +182,9 @@ TROJAN_HU_URL="trojan://${TROJAN_PASS}@${DOMAIN}:443?type=httpupgrade&security=t
 VMESS_HU_JSON="{\"v\":\"2\",\"ps\":\"Gayroxy-${COUNTRY_FLAG}-VMess-HU\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID_VMESS}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"${PATH_VMESS_HU}\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\",\"fp\":\"chrome\"}"
 VMESS_HU_URL="vmess://$(echo -n "$VMESS_HU_JSON" | base64 -w 0)"
 
+ROTATE1MIN_URL="vless://${UUID_ROTATE1MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE1MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-1min"
 ROTATE2MIN_URL="vless://${UUID_ROTATE2MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE2MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-2min"
+ROTATE5MIN_URL="vless://${UUID_ROTATE5MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE5MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-5min"
 
 SOCKS5_URL="socks5://127.0.0.1:${PORT_SOCKS5}#Gayroxy-${COUNTRY_FLAG}-Socks5"
 HTTP_URL="http://127.0.0.1:${PORT_HTTP_PROXY}#Gayroxy-${COUNTRY_FLAG}-HTTP"
@@ -193,7 +202,9 @@ ${VMESS_GRPC_URL}
 ${VLESS_HU_URL}
 ${TROJAN_HU_URL}
 ${VMESS_HU_URL}
+${ROTATE1MIN_URL}
 ${ROTATE2MIN_URL}
+${ROTATE5MIN_URL}
 ${REALITY_LOCAL_URL}
 ${SOCKS5_URL}
 ${HTTP_URL}"
@@ -353,7 +364,7 @@ export WORKER_URL DOMAIN
 
 export SUB_B64 VLESS_URL TROJAN_URL VMESS_URL VLESS_GRPC_URL TROJAN_GRPC_URL
 export SS_URL SS_WS_URL SS_GRPC_URL VMESS_GRPC_URL
-export VLESS_HU_URL TROJAN_HU_URL VMESS_HU_URL ROTATE2MIN_URL
+export VLESS_HU_URL TROJAN_HU_URL VMESS_HU_URL ROTATE1MIN_URL ROTATE2MIN_URL ROTATE5MIN_URL
 export REALITY_LOCAL_URL SOCKS5_URL HTTP_URL
 export UUID_VLESS PATH_VLESS TROJAN_PASS PATH_TROJAN UUID_VMESS PATH_VMESS
 export UUID_VLESS_GRPC GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN
@@ -387,12 +398,14 @@ keys = [
     'PATH_VLESS_GRPC','PATH_TROJAN_GRPC',
     'PATH_SS_WS','PATH_SS_GRPC','PATH_VMESS_GRPC',
     'PATH_VLESS_HU','PATH_TROJAN_HU','PATH_VMESS_HU',
+    'UUID_ROTATE1MIN','UUID_ROTATE2MIN','UUID_ROTATE5MIN',
+    'PATH_ROTATE1MIN','PATH_ROTATE2MIN','PATH_ROTATE5MIN',
     'GRPC_SERVICE_VLESS','GRPC_SERVICE_TROJAN',
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
     'REALITY_PUBLIC','DOMAIN','WORKER_URL','REALITY_SNI',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
-    'ROTATE2MIN_URL','API_TOKEN',
+    'ROTATE1MIN_URL','ROTATE2MIN_URL','ROTATE5MIN_URL','API_TOKEN',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
 try:
