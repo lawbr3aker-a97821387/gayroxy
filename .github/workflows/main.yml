@@ -5,8 +5,8 @@ concurrency:
   # GitHub cancel — termination is queued but never delivered until timeout)
   # wedges the group, bump to the next version so the newest dispatch starts
   # immediately. serve.sh's handover lock handles the momentary overlap.
-  # History: v1 → 33422909163, v2 → 33564083894, v3 → 33574439636, v4 → 33575514430.
-  group: gayroxy-deploy-v5
+  # History: v1 → 33422909163, v2 → 33564083894, v3 → 33574439636, v4 → 33575514430, v5 → 33576017366.
+  group: gayroxy-deploy-v6
   cancel-in-progress: true
 
 on:

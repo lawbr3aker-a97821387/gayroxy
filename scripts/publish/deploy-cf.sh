@@ -39,7 +39,11 @@ set -euo pipefail
 SCRIPT_NAME="gayroxy"
 KV_NAMESPACE_TITLE="gayroxy-assets"
 API="https://api.cloudflare.com/client/v4"
-WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# WORKDIR = the repo root (NOT this script's dir). After decomp this script
+# lives in scripts/publish/ but its inputs (worker/, sub/, geo/, aux/) are all
+# at the repo root; the workflow jobs set SUB_DIR/GEO_DIR to $PWD/sub explicitly
+# too. Up 2 levels: scripts/publish/../.. == repo root.
+WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 CF_TOKEN="${CF_TOKEN:-}"
 if [[ -z "$CF_TOKEN" ]]; then
