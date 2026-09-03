@@ -52,13 +52,15 @@ ROTATE2MIN_STATE="$AUX_DIR/rotate2min-state.json"
 ROTATE5MIN_CONFIG="$AUX_DIR/rotate5min.json"
 ROTATE5MIN_META="$AUX_DIR/rotate5min-meta.tsv"
 ROTATE5MIN_STATE="$AUX_DIR/rotate5min-state.json"
-# PIDs for the three aux xray instances + rotation loops
+# PIDs for the three aux xray instances + rotation loops. Aux xray PIDs are held
+# in pid files (written by the rotation loops that own them) so the parent
+# cleanup can reach them even though the loops run in subshells.
 # shellcheck disable=SC2034  # rotation/loop PIDs tracked for cleanup
-ROTATE1MIN_PID=""
+ROTATE1MIN_PID="$AUX_DIR/rotate1min.pid"
 # shellcheck disable=SC2034
-ROTATE2MIN_PID=""
+ROTATE2MIN_PID="$AUX_DIR/rotate2min.pid"
 # shellcheck disable=SC2034
-ROTATE5MIN_PID=""
+ROTATE5MIN_PID="$AUX_DIR/rotate5min.pid"
 # shellcheck disable=SC2034
 LOOP1MIN_PID=""
 # shellcheck disable=SC2034
@@ -73,7 +75,15 @@ log()  { echo -e "\033[0;32m[health-agent]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[health-agent] WARNING\033[0m $*"; }
 
 cleanup(){
-  for pid_var in ROTATE1MIN_PID ROTATE2MIN_PID ROTATE5MIN_PID LOOP1MIN_PID LOOP2MIN_PID LOOP5MIN_PID; do
+  # Aux xray PIDs live in pid files (owned by the rotation loops), plus the
+  # parent-owned loop PIDs.
+  local pf pid
+  for pf in "$ROTATE1MIN_PID" "$ROTATE2MIN_PID" "$ROTATE5MIN_PID"; do
+    pid=$(cat "$pf" 2>/dev/null || true)
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$pf"
+  done
+  for pid_var in LOOP1MIN_PID LOOP2MIN_PID LOOP5MIN_PID; do
     [[ -n "${!pid_var:-}" ]] && kill "${!pid_var}" 2>/dev/null || true
   done
 }
@@ -624,14 +634,14 @@ push_sub(){
 
 # ─── Health JSON report ────────────────────────────────────────────────────────
 write_health_json(){
-  python3 - "$POOL_FILE" "$AUX_DIR/health.json" "$LEADERBOARD" <<'PY'
+  python3 - "$POOL_FILE" "$AUX_DIR/health.json" "$LEADERBOARD" \
+    "$AUX_DIR/rotate1min-state.json" "$AUX_DIR/rotate2min-state.json" "$AUX_DIR/rotate5min-state.json" <<'PY'
 import sys,json,datetime,collections,os
-p,out,lb_path=sys.argv[1:]
+p,out,lb_path,r1,r2,r5=sys.argv[1:]
 d=collections.defaultdict(list)
 for line in open(p,errors='ignore'):
  parts=line.rstrip('\n').split('\t')
  if len(parts)==4: d[parts[0]].append({'latencyMs':int(parts[1]),'country':parts[2]})
-# Per-sub leaderboard summary
 lb={}
 try: lb=json.load(open(lb_path))
 except: pass
@@ -639,6 +649,19 @@ lb_summary={}
 for sub,entries in lb.items():
  lb_summary[sub]={'topConfigs':[{'latencyMs':e['latency'],'country':e['country']} for e in entries[:10]]}
 result={'checkedAt':datetime.datetime.utcnow().isoformat()+'Z','sources':d,'leaderboard':lb_summary}
+rotations={}
+for tier,state_path in (('1min',r1),('2min',r2),('5min',r5)):
+ if not os.path.exists(state_path): continue
+ try:
+  s=json.load(open(state_path))
+  if isinstance(s,dict) and s.get('tag'):
+   rotations[tier]={'tag':s.get('tag'),'country':s.get('country'),'host':s.get('host')}
+ except Exception: pass
+if rotations:
+ result['rotations']=rotations
+ result['rotation']={'enabled':True,'algorithms':sorted(rotations.keys())}
+else:
+ result['rotation']={'enabled':False}
 json.dump(result,open(out,'w'),ensure_ascii=False,indent=2)
 PY
   if [[ -n "$WORKER_URL" ]]; then
@@ -658,11 +681,15 @@ gen_rotate_config(){
   local interval="$1" port="$2" cfg_out="$3" meta_out="$4" state_out="$5"
   local uuid="$6" ws_path="$7" main_country="$8" main_host="$9"
 
-  # Get runner's exit country via ip-api.com
-  local run_country
-  run_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null \
-    || echo '??')
+  # Get runner's exit country. Caller passes it as $8 (already computed once in
+  # write_all_rotate_configs); fall back to a direct lookup only if empty so we
+  # never hit ip-api three times per finalize.
+  local run_country="$main_country"
+  if [[ -z "$run_country" || "$run_country" == "??" ]]; then
+    run_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("countryCode","??"))' 2>/dev/null \
+      || echo '??')
+  fi
 
   python3 - "$POOL_FILE" "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$run_country" "$main_host" "$port" <<'PY'
 import sys,json,os
@@ -744,91 +771,129 @@ PY
 }
 
 # ─── Start an aux xray instance ───────────────────────────────────────────────
+# $1 = config path, $2 = log path, $3 = pid-file path. The previous instance (if
+# any) is stopped and we wait for its bind port to free before launching the new
+# one, so two xrays never fight over the same listen port. The live PID is
+# recorded in the pid file for parent cleanup.
 start_aux_xray(){
-  local cfg="$1" logf="$2" pid_var="$3"
-  if [[ -x "$XRAY_BIN" ]]; then
-    [[ -n "${!pid_var:-}" ]] && kill "${!pid_var}" 2>/dev/null || true
-    "$XRAY_BIN" run -c "$cfg" >"$logf" 2>&1 &
-    eval "$pid_var=$!"
-    sleep .5
-    kill -0 "${!pid_var}" 2>/dev/null || warn "aux xray ($cfg) failed to start"
-  else
-    eval "$pid_var=\"\""
+  local cfg="$1" logf="$2" pidfile="$3" old pid port port_free=0
+  if [[ ! -x "$XRAY_BIN" ]]; then
+    rm -f "$pidfile"
     warn "xray binary missing; skipping launch ($cfg)"
+    return 0
   fi
+  old=$(cat "$pidfile" 2>/dev/null || true)
+  if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
+    kill "$old" 2>/dev/null || true
+  fi
+  port=$(python3 - "$cfg" <<'PY'
+import sys,json
+try: print(json.load(open(sys.argv[1]))['inbounds'][0].get('port','')); sys.exit(0)
+except Exception: sys.exit(1)
+PY
+  )
+  # Give the dying process a moment to release the bind port so a freshly
+  # launched xray never collides with the one it is replacing.
+  if [[ -n "$port" ]]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then port_free=1; break; fi
+      exec 3>&- 3<&- 2>/dev/null || true
+      sleep .1
+    done
+  fi
+  "$XRAY_BIN" run -c "$cfg" >"$logf" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$pidfile"
+  sleep .5
+  kill -0 "$pid" 2>/dev/null || warn "aux xray ($cfg) failed to start"
 }
 
-# ─── Set a rotation target with a small request-level fallback chain ─────────
-# Rewrites the aux xray config so its rotate inbound routes through a balancer
-# led by $1 (the newly selected node), with up to $2 fallback nodes available so
-# a client whose primary node dies mid-interval transparently fails over instead
-# of getting an error.  Every node in the chain is an ip-api-verified pool node.
+# ─── Set a rotation target directly ────────────────────────────────────────────
+# Rewrites the aux xray config so its rotate inbound routes straight to $1 (the
+# selected node). We avoid a selector balancer here: a plain selector
+# round-robins across its members, so it would NOT honor the scheduled lead, and
+# including `pool-main` (direct freedom egress) would defeat rotation entirely.
+# Direct routing makes the exit deterministic and exactly what the schedule says.
 # NOTE: `fallbackTag` is deliberately NOT used — this xray build (26.x) rejects
 # it at startup ("not all dependencies are resolved") and the process dies
-# immediately. The balancer's selector alone gives node failover.
+# immediately.
 set_rotate_target(){
-  local cfg="$1" lead="$2" fb_max="${3:-3}"
-  python3 - "$cfg" "$lead" "$fb_max" <<'PY'
+  local cfg="$1" lead="$2"
+  python3 - "$cfg" "$lead" <<'PY'
 import sys,json
-cfg_path,lead,fb_max=sys.argv[1],sys.argv[2],int(sys.argv[3])
+cfg_path,lead=sys.argv[1],sys.argv[2]
 d=json.load(open(cfg_path))
 obs=d.get('outbounds',[])
 tags=[o['tag'] for o in obs if isinstance(o.get('tag'),str) and o['tag'].startswith('pool-')]
 if not tags:
     json.dump(d,open(cfg_path,'w'),indent=2); raise SystemExit
-# Order: lead first, then the rest (different host/country preferred at pick time).
-chain=[lead]+[t for t in tags if t!=lead]
-chain=chain[:1+fb_max]
-if lead not in chain: chain=[lead]+chain
-# Balancer led by `lead`, failing over across the rest of the chain.
-d.setdefault('routing',{})
-d['routing']['balancers']=[{'tag':'rotate-bal','selector':chain}]
-# Point the rotate inbound through the balancer.
-rules=d['routing'].get('rules',[])
+# Honor the requested lead if it actually exists in this config's outbounds,
+# otherwise fall back to the first real pool node. A stale `lead` must never be
+# referenced: xray 26.x crashes at startup ("not all dependencies are resolved")
+# if a routing target doesn't resolve to an existing outbound.
+target=lead if lead in tags else tags[0]
+# Point the rotate inbound directly at the selected outbound. A plain selector
+# balancer round-robins across all members and so would NOT honor the scheduled
+# lead (rotation would be effectively random), and `pool-main` (direct freedom
+# egress) in the chain defeats rotation entirely. Direct routing is
+# deterministic: every connection egresses through exactly the selected node
+# until the loop rotates again.
+rules=d.setdefault('routing',{}).get('rules',[])
 for r in rules:
     if r.get('inboundTag')==['rotate'] or r.get('inboundTag')=='rotate':
-        r.pop('outboundTag',None); r['balancerTag']='rotate-bal'
+        r.pop('balancerTag',None); r['outboundTag']=target
         break
 else:
-    rules.append({'type':'field','inboundTag':['rotate'],'balancerTag':'rotate-bal'})
+    rules.append({'type':'field','inboundTag':['rotate'],'outboundTag':target})
 json.dump(d,open(cfg_path,'w'),indent=2)
+print(target)
 PY
 }
 
 # ─── Rotation loops (three tiers) ─────────────────────────────────────────────
+# Each loop is the SOLE owner of its aux xray: it starts it on the first pass
+# (so egress is live immediately, independent of any finalize), then rotates the
+# target and restarts it on the configured cadence. write_all_rotate_configs
+# only regenerates configs — it never restarts, so the parent and a loop can
+# never fight over the same port.
+update_rotate_target(){
+  local cfg="$1" meta="$2" state="$3" logf="$4" pidfile="$5" reason="$6"
+  [[ -f "$cfg" && -f "$meta" ]] || return 0
+  local next
+  next=$(pick_next "$meta" "$state" 2>/dev/null || true)
+  [[ -n "$next" ]] || return 0
+  set_rotate_target "$cfg" "$next"
+  start_aux_xray "$cfg" "$logf" "$pidfile"
+  log "Rotate $reason → $next"
+}
+
 rotate_loop_1min(){
+  update_rotate_target "$ROTATE1MIN_CONFIG" "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" \
+    "$AUX_LOG/rotate1min.log" "$ROTATE1MIN_PID" "1min"
   while :; do
     sleep "$ROTATE1MIN_INTERVAL"
-    [[ -f "$ROTATE1MIN_CONFIG" && -f "$ROTATE1MIN_META" ]] || continue
-    local next; next=$(pick_next "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" 2>/dev/null || true)
-    [[ -n "$next" ]] || continue
-    set_rotate_target "$ROTATE1MIN_CONFIG" "$next"
-    start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" ROTATE1MIN_PID
-    log "Rotate 1min → $next (with failover)"
+    update_rotate_target "$ROTATE1MIN_CONFIG" "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" \
+      "$AUX_LOG/rotate1min.log" "$ROTATE1MIN_PID" "1min"
   done
 }
 
 rotate_loop_2min(){
+  update_rotate_target "$ROTATE2MIN_CONFIG" "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" \
+    "$AUX_LOG/rotate2min.log" "$ROTATE2MIN_PID" "2min"
   while :; do
     sleep "$ROTATE2MIN_INTERVAL"
-    [[ -f "$ROTATE2MIN_CONFIG" && -f "$ROTATE2MIN_META" ]] || continue
-    local next; next=$(pick_next "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" 2>/dev/null || true)
-    [[ -n "$next" ]] || continue
-    set_rotate_target "$ROTATE2MIN_CONFIG" "$next"
-    start_aux_xray "$ROTATE2MIN_CONFIG" "$AUX_LOG/rotate2min.log" ROTATE2MIN_PID
-    log "Rotate 2min → $next (with failover)"
+    update_rotate_target "$ROTATE2MIN_CONFIG" "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" \
+      "$AUX_LOG/rotate2min.log" "$ROTATE2MIN_PID" "2min"
   done
 }
 
 rotate_loop_5min(){
+  update_rotate_target "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
+    "$AUX_LOG/rotate5min.log" "$ROTATE5MIN_PID" "5min"
   while :; do
     sleep "$ROTATE5MIN_INTERVAL"
-    [[ -f "$ROTATE5MIN_CONFIG" && -f "$ROTATE5MIN_META" ]] || continue
-    local next; next=$(pick_next "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" 2>/dev/null || true)
-    [[ -n "$next" ]] || continue
-    set_rotate_target "$ROTATE5MIN_CONFIG" "$next"
-    start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" ROTATE5MIN_PID
-    log "Rotate 5min → $next (with failover)"
+    update_rotate_target "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
+      "$AUX_LOG/rotate5min.log" "$ROTATE5MIN_PID" "5min"
   done
 }
 
@@ -845,11 +910,6 @@ write_all_rotate_configs(){
     "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
   gen_rotate_config "$ROTATE5MIN_INTERVAL" 10034 "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
     "${UUID_ROTATE5MIN:-}" "${PATH_ROTATE5MIN:-}" "$main_country" "${DOMAIN}"
-
-  # Launch all three aux xray instances
-  start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" ROTATE1MIN_PID
-  start_aux_xray "$ROTATE2MIN_CONFIG" "$AUX_LOG/rotate2min.log" ROTATE2MIN_PID
-  start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" ROTATE5MIN_PID
 }
 
 finalize(){

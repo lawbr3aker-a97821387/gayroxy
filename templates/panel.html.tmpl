@@ -858,9 +858,12 @@
     }
 
     // ─── Rotation Status ──────────────────────────────────────────────────────
-    // Shows which rotation algorithms are active and which backend they point to.
+    // Shows which rotation algorithms (1/2/5-min tiers) are active and which
+    // backend each currently points to, from the health agent's rotations map.
     const ROTATION_ALGOS = [
-        { key: 'rotate2min', label: '🔄 Rotate 2min', desc: 'Rotates through healthy nodes every 2 minutes' }
+        { key: '1min', label: '🔄 Rotate 1min', desc: 'Rotates exit every 1 minute', intervalSec: 60 },
+        { key: '2min', label: '🔄 Rotate 2min', desc: 'Rotates exit every 2 minutes', intervalSec: 120 },
+        { key: '5min', label: '🔄 Rotate 5min', desc: 'Rotates exit every 5 minutes', intervalSec: 300 }
     ];
 
     async function renderRotationStatus() {
@@ -872,45 +875,44 @@
             if (r.ok) health = await r.json();
         } catch(e) {}
         const rotation = health && health.rotation ? health.rotation : null;
-        if (!rotation || !rotation.algo) {
+        const rotations = (health && health.rotations) ? health.rotations : null;
+        if (!rotation || !rotation.enabled || !rotations || Object.keys(rotations).length === 0) {
             el.innerHTML = '<div style="font-size:13px;color:var(--text2);text-align:center;padding:12px;">' +
                 '<span style="opacity:.5;">🔄 No rotation algorithm active.</span><br>' +
                 '<span style="font-size:11px;">Enable the health agent in your workflow to activate.</span></div>';
             return;
         }
-        const algo = ROTATION_ALGOS.find(a => a.key === rotation.algo) || { label: rotation.algo, desc: '' };
-        const flag = rotation.country ? codeToFlag(rotation.country) : '🌐';
-        const countryName = rotation.country || '??';
-        const host = rotation.host || '—';
-        const activeTag = rotation.routingRule || rotation.tag || '—';
-        const interval = rotation.intervalSec || 120;
-        el.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">' +
-            '<div class="program-section" style="margin:0;">' +
+        let cards = '';
+        for (const key of Object.keys(rotations).sort()) {
+            const rot = rotations[key];
+            const algo = ROTATION_ALGOS.find(a => a.key === key) || { label: '🔄 ' + key, desc: '', intervalSec: 0 };
+            const flag = rot.country ? codeToFlag(rot.country) : '🌐';
+            const countryName = rot.country || '??';
+            const host = rot.host || '—';
+            const interval = algo.intervalSec || rotations[key].intervalSec || 0;
+            cards +=
+            '<div class="program-section" style="margin:0;border-left:3px solid var(--accent);">' +
                 '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
-                    '<div style="font-size:24px;">' + flag + '</div>' +
-                    '<div style="flex:1;min-width:180px;">' +
-                        '<div style="font-weight:600;font-size:15px;">' + algo.label + '</div>' +
+                    '<div style="font-size:22px;">' + flag + '</div>' +
+                    '<div style="flex:1;min-width:160px;">' +
+                        '<div style="font-weight:600;font-size:14px;">' + algo.label + '</div>' +
                         '<div style="font-size:12px;color:var(--text2);margin-top:2px;">' + algo.desc + '</div>' +
                     '</div>' +
-                    '<div style="text-align:right;">' +
-                        '<div style="font-size:11px;color:var(--text2);">interval</div>' +
-                        '<div style="font-weight:600;">' + interval + 's</div>' +
+                    '<div style="text-align:right;font-size:11px;color:var(--text2);">' +
+                        'interval<br><span style="font-weight:600;color:var(--text1);">' + interval + 's</span>' +
                     '</div>' +
                 '</div>' +
-            '</div>' +
-            '<div class="program-section" style="margin:0;border-left:3px solid var(--accent);">' +
-                '<div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Current Backend</div>' +
-                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
-                    '<div style="font-size:20px;">' + flag + '</div>' +
-                    '<div style="flex:1;min-width:140px;">' +
-                        '<div style="font-weight:600;">' + host + '</div>' +
-                        '<div style="font-size:12px;color:var(--text2);">' + countryName + ' &middot; <code style="font-size:11px;">' + activeTag + '</code></div>' +
-                    '</div>' +
+                '<div style="font-size:11px;color:var(--text2);margin-top:8px;">' +
+                    '<span style="font-weight:600;color:var(--text1);">' + host + '</span>' +
+                    ' &middot; ' + countryName +
+                    ' &middot; <code style="font-size:11px;">' + (rot.tag || '—') + '</code>' +
                 '</div>' +
-            '</div>' +
+            '</div>';
+        }
+        el.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">' + cards +
             '<div style="font-size:11px;color:var(--text2);padding:0 4px;">' +
                 'Last check: ' + (health.checkedAt ? new Date(health.checkedAt).toLocaleString() : 'never') +
-                '&nbsp;&middot;&nbsp; The client config is <b>fixed</b> — only this backend changes.' +
+                '&nbsp;&middot;&nbsp; Client configs are <b>fixed</b> — only the exit backend changes.' +
             '</div>' +
         '</div>';
     }
