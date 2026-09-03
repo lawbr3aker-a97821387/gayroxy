@@ -37,6 +37,7 @@ ROTATEWARP6MIN_INTERVAL="${ROTATEWARP6MIN_INTERVAL:-360}"
 # WARP planes are cred files under WARP_PLANE_DIR (registered by serve.sh);
 # WARP_PLANE_DIR/WARP_PLANE_COUNT come from lib/common.sh.
 WARP_PLANE_DIR="${WARP_PLANE_DIR:-${LOG_DIR}/warp-planes}"
+WARP_ASSIGN_LOCK="${AUX_DIR:-$ROOT/aux}/warp-assignments.lock"
 # ─── Paths ────────────────────────────────────────────────────────────────────
 XRAY_BIN="${XRAY_BIN:-$ROOT/xray}"
 DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
@@ -134,10 +135,15 @@ trap cleanup INT TERM EXIT
 # ─── Subscription parsing ──────────────────────────────────────────────────────
 fetch_sub(){
   local body
-  body=$(curl -fsSL --max-time 20 --retry 1 "$1" 2>/dev/null || true)
+  body=$(curl -fsSL --max-time 20 --retry 2 -A 'Gayroxy-Subscription-Validator/1.0' "$1" 2>/dev/null || true)
   [[ -n "$body" ]] || return 1
-  if ! [[ "$body" == *'vless://'* || "$body" == *'vmess://'* || "$body" == *'trojan://'* || "$body" == *'ss://'* ]]; then
-    body=$(printf '%s' "$body" | tr -d '\r\n ' | base64 -d 2>/dev/null || true)
+  # Providers commonly wrap links in Markdown fences, use CRLF, or return
+  # unpadded URL-safe base64. Clean the plain-text form first; only decode when
+  # no supported URI is present.
+  body=$(printf '%s\n' "$body" | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/`//g' -e '/^#/d')
+  if ! printf '%s\n' "$body" | grep -qE '^(vless|vmess|trojan|ss)://'; then
+    body=$(printf '%s' "$body" | tr -d '\r\n ' | tr '_-' '/+' | base64 -d 2>/dev/null || true)
+    body=$(printf '%s\n' "$body" | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/`//g')
   fi
   printf '%s\n' "$body" | grep -E '^(vless|vmess|trojan|ss)://' || true
 }
@@ -173,6 +179,16 @@ if ':' not in authority: raise SystemExit(1)
 host,port=authority.rsplit(':',1)
 params=urllib.parse.parse_qs(q)
 d={'_proto':p,'_remark':urllib.parse.unquote(frag),'host':host,'port':int(port),'user':urllib.parse.unquote(user),'type':params.get('type',['tcp'])[0],'security':params.get('security',[''])[0],'path':params.get('path',[''])[0],'sni':params.get('sni',[''])[0],'fp':params.get('fp',[''])[0],'serviceName':params.get('serviceName',[''])[0],'method':params.get('method',['aes-256-gcm'])[0],'flow':params.get('flow',[''])[0],'pbk':params.get('pbk',[''])[0],'sid':params.get('sid',[''])[0]}
+if p=='ss':
+    # SS URIs encode method:password in the user part. Keep those fields
+    # separate so Xray receives a real method and password.
+    raw=urllib.parse.unquote(user)
+    try:
+        raw=base64.b64decode(raw+'='*((-len(raw))%4)).decode()
+    except Exception:
+        pass
+    if ':' in raw:
+        d['method'],d['user']=raw.split(':',1)
 print(json.dumps(d))
 PY
 }
@@ -666,18 +682,23 @@ for sub, cfg in kept:
         raw=json.dumps({k:v for k,v in x.items() if not k.startswith('_')},ensure_ascii=False).encode()
         link='vmess://'+base64.b64encode(raw).decode()
     else:
-        u=urllib.parse.quote(x.get('user',''),safe='')
-        q={'type':x.get('type','tcp'),'security':x.get('security','')}
-        if x.get('path'): q['path']=x['path']
-        if x.get('sni'): q['sni']=x['sni']
-        if x.get('serviceName'): q['serviceName']=x['serviceName']
-        if x.get('flow'): q['flow']=x['flow']
-        if x.get('pbk'): q['pbk']=x['pbk']
-        if x.get('sid'): q['sid']=x['sid']
-        if x.get('fp'): q['fp']=x['fp']
-        if x.get('method'): q['method']=x['method']
-        query=urllib.parse.urlencode(q)
-        link=f'{proto}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
+        if proto=='ss':
+            # Standard SS URI form: ss://method:password@host:port#remark.
+            method=urllib.parse.quote(x.get('method','aes-256-gcm'),safe='')
+            password=urllib.parse.quote(x.get('user',''),safe='')
+            link=f'ss://{method}:{password}@{host}:{port}#{urllib.parse.quote(remark)}'
+        else:
+            u=urllib.parse.quote(x.get('user',''),safe='')
+            q={'type':x.get('type','tcp'),'security':x.get('security','')}
+            if x.get('path'): q['path']=x['path']
+            if x.get('sni'): q['sni']=x['sni']
+            if x.get('serviceName'): q['serviceName']=x['serviceName']
+            if x.get('flow'): q['flow']=x['flow']
+            if x.get('pbk'): q['pbk']=x['pbk']
+            if x.get('sid'): q['sid']=x['sid']
+            if x.get('fp'): q['fp']=x['fp']
+            query=urllib.parse.urlencode(q)
+            link=f'{proto}://{u}@{host}:{port}?{query}#{urllib.parse.quote(remark)}'
     print(link)
 PY
   cat "$SUB_DIR/external-healthy.txt" | base64 -w0 > "$SUB_DIR/subscription.b64"
@@ -800,14 +821,28 @@ open(meta_path,'w').write('\n'.join(meta)+'\n')
 first=next((o['tag'] for o in obs if o['tag'].startswith('pool-')),'pool-main')
 c={'log':{'loglevel':'warning'},'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':first}]}}
 json.dump(c,open(out,'w'),indent=2)
-# Seed rotation state
+# Seed rotation state without discarding the current target during a
+# health/source finalize. A fresh target is used only on first creation or when
+# the previous outbound no longer exists.
 py_meta={}
 for m in meta:
  parts=m.split('\t')
  if len(parts)==3: py_meta[parts[0]]=(parts[1],parts[2])
-seed=py_meta.get(first)
+current=None
+try:
+ old=json.load(open(state_path))
+ if old.get('tag') in py_meta: current=old.get('tag')
+except Exception:
+ pass
+lead=current or first
+# The process may be restarted by finalize; make its initial routing target
+# match the preserved state instead of always starting on `first`.
+if c.get('routing',{}).get('rules'):
+ c['routing']['rules'][0]['outboundTag']=lead
+json.dump(c,open(out,'w'),indent=2)
+seed=py_meta.get(lead)
 if seed:
- json.dump({'tag':first,'country':seed[0],'host':seed[1]},open(state_path,'w'))
+ json.dump({'tag':lead,'country':seed[0],'host':seed[1]},open(state_path,'w'))
 PY
 }
 
@@ -882,10 +917,19 @@ c={'log':{'loglevel':'warning'},
            {'type':'field','inboundTag':['api-in'],'outboundTag':'api'}
        ]}}
 json.dump(c,open(out,'w'),indent=2)
-# State: which outbound is currently selected (the single live lead, or the
-# fallback direct) plus the api server address used for `bo` overrides.
-lead = live[0] if live else obs[0]['tag']
-json.dump({'tag':lead,'country':'WARP','host':meta[0].split('\t')[2],
+# Preserve the current lead across health/source finalization. Previously every
+# finalize reset all tiers to live[0] (normally warp-0), making the published
+# URLs converge again before their next interval tick.
+old_tag = None
+try:
+    old = json.load(open(state_path))
+    if old.get('tag') in live:
+        old_tag = old.get('tag')
+except Exception:
+    pass
+lead = old_tag or (live[0] if live else obs[0]['tag'])
+host = next((m.split('\t')[2] for m in meta if m.split('\t')[0] == lead), 'direct')
+json.dump({'tag':lead,'country':'WARP','host':host,
            'api':'127.0.0.1:%d'%int(api_port),'balancer':'warpsel'},open(state_path,'w'))
 PY
 }
@@ -1150,7 +1194,7 @@ rotate_loop_5min(){
 # pin a dead egress and wait out the whole cadence.
 # $1 = tier, $2 = live TSV (candidates), $3 = state, $4 = full meta (all planes)
 update_warp_target(){
-  local tier="$1" meta="$2" state="$3" full_meta="$4"
+  local tier="$1" meta="$2" state="$3"
   [[ -f "$meta" ]] || return 0
   local prev_host api balancer client_port candidate_used=""
   read -r prev_host api balancer <<< "$(python3 - "$state" 2>/dev/null <<'PY' || true
@@ -1161,7 +1205,7 @@ except Exception: print('? 127.0.0.1:10050 warpsel')
 PY
 )"
   client_port=$(warp_probe_client_port "$tier")
-  local candidates attempts tag nhost
+  local candidates tag nhost
   # pick up to N distinct candidate tags from the live set (never the current).
   mapfile -t candidates < <( python3 - "$meta" "$state" <<'PY' || true
 import json,sys,os,random
@@ -1191,6 +1235,20 @@ PY
   for line in "${candidates[@]}"; do
     [[ -n "$line" ]] || continue
     tag=$(cut -f1 <<<"$line"); nhost=$(cut -f3 <<<"$line")
+    # Keep the three published WARP tiers on different planes whenever at
+    # least three live planes exist. The lock protects the check/update window
+    # from concurrent rotation loops.
+    exec 9>"$WARP_ASSIGN_LOCK"
+    flock -x 9
+    reserved=0
+    for other in "$ROTATE_WARP2MIN_STATE" "$ROTATE_WARP4MIN_STATE" "$ROTATE_WARP6MIN_STATE"; do
+      [[ "$other" == "$state" ]] && continue
+      if grep -q '"tag"[[:space:]]*:[[:space:]]*"'"$tag"'"' "$other" 2>/dev/null; then reserved=1; break; fi
+    done
+    if (( reserved == 1 )); then
+      flock -u 9; exec 9>&-
+      continue
+    fi
     if warp_probe_plane "$tier" "$api" "$balancer" "$tag" "$meta"; then
       candidate_used="$tag"
       python3 - "$state" "$tag" "$nhost" "$api" <<'PY'
@@ -1202,9 +1260,11 @@ s['tag']=tag; s['host']=host; s['api']=api; s['balancer']='warpsel'
 json.dump(s,open(p,'w'),indent=2)
 PY
       log "Rotate[$tier]: host $prev_host → $tag (WARP, ${nhost:-?}) verified live, override committed"
+      flock -u 9; exec 9>&-
       break
     else
       warn "Rotate[$tier]: candidate $tag probe DEAD, trying next"
+      flock -u 9; exec 9>&-
     fi
   done
   if [[ -z "$candidate_used" ]]; then
