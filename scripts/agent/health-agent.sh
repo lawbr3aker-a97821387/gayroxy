@@ -345,10 +345,31 @@ parallel_test(){
     leaderboard_insert "$sub" "$rl" "$rc" "$rn" 2>/dev/null || true
   done < "$tmp_dir/probe-out"
 
-  # Report
+  # Report — verbose: list every probe result for this sub, tagging each with the
+  # parent sub + host so a failing config is visible right next to the healthy
+  # ones. We diff the passed node set ($tmp_dir/probe-out) against the input
+  # nodes to label the dead ones.
   local pass
   pass=$(wc -l < "$tmp_dir/probe-out" 2>/dev/null || echo 0)
   local dead=$((total - pass))
+  PASS_SET="$tmp_dir/probe-out" NODES_STR="$(
+    for n in "${nodes[@]}"; do printf '%s\n' "$n"; done)" python3 - "$sub" <<'PY' || true
+import sys,os
+sub=sys.argv[1]
+passed=set()
+for line in open(os.environ['PASS_SET'],errors='ignore'):
+ lst=line.rstrip('\n').rsplit('|',2)
+ if len(lst)==3: passed.add(lst[2])
+def host(n):
+ try:
+  import json; x=json.loads(n); return (x.get('host') or x.get('add') or '?').lower()
+ except Exception: return '?'
+dead=[]
+for n in os.environ['NODES_STR'].splitlines():
+ if n and n not in passed: dead.append(host(n))
+for n in sorted(passed): print('  [%s] OK  %s' % (sub, host(n)))
+for h in dead: print('  [%s] FAIL %s' % (sub, h))
+PY
   rm -rf "$tmp_dir"
   if [[ $dead -gt 0 ]]; then
     log "$sub: $pass/$total alive, $dead dead (leaderboard top 10 maintained)"
@@ -755,17 +776,22 @@ state={}
 if os.path.exists(state_path):
  try: state=json.load(open(state_path))
  except: state={}
-prev=state.get('tag'); pc=state.get('country'); ph=state.get('host')
+prev=state.get('tag'); ph=state.get('host'); recent=state.get('recent',[])
 tags=list(meta)
-def pick(pred):
- c=[t for t in tags if t!=prev and pred(t)]
- return random.choice(c) if c else None
-t=pick(lambda x: meta[x]['country']!=pc and meta[x]['host']!=ph) \
- or pick(lambda x: meta[x]['host']!=ph) \
- or pick(lambda x: True)
-if t is None: t=prev
+# Prefer a node whose HOST hasn't been used recently and differs from the
+# current one, expanding the rotation beyond a 2-node bounce. Tie-break random.
+recent_hosts=set(recent)
+fresh=[t for t in tags if t!=prev and meta[t]['host']!=ph and meta[t]['host'] not in recent_hosts]
+if not fresh: fresh=[t for t in tags if t!=prev and meta[t]['host']!=ph]
+if not fresh: fresh=[t for t in tags if t!=prev]
+if not fresh: fresh=[prev]
+t=random.choice(fresh)
 sel=meta[t]
-json.dump({'tag':t,'country':sel['country'],'host':sel['host']},open(state_path,'w'))
+# Track a small recency window (hosts) so we cycle across all distinct egresses.
+recent=[h for h in recent if h!=sel['host']]
+recent.insert(0,sel['host'])
+recent=recent[:6]
+json.dump({'tag':t,'country':sel['country'],'host':sel['host'],'recent':recent},open(state_path,'w'))
 print(t)
 PY
 }
@@ -776,7 +802,7 @@ PY
 # one, so two xrays never fight over the same listen port. The live PID is
 # recorded in the pid file for parent cleanup.
 start_aux_xray(){
-  local cfg="$1" logf="$2" pidfile="$3" old pid port port_free=0
+  local cfg="$1" logf="$2" pidfile="$3" old pid port
   if [[ ! -x "$XRAY_BIN" ]]; then
     rm -f "$pidfile"
     warn "xray binary missing; skipping launch ($cfg)"
@@ -795,8 +821,9 @@ PY
   # Give the dying process a moment to release the bind port so a freshly
   # launched xray never collides with the one it is replacing.
   if [[ -n "$port" ]]; then
+    # shellcheck disable=SC2034  # loop waits until the port is free
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then port_free=1; break; fi
+      if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
       exec 3>&- 3<&- 2>/dev/null || true
       sleep .1
     done
@@ -859,12 +886,23 @@ PY
 update_rotate_target(){
   local cfg="$1" meta="$2" state="$3" logf="$4" pidfile="$5" reason="$6"
   [[ -f "$cfg" && -f "$meta" ]] || return 0
-  local next
+  local prev_host next ncountry nhost port
+  # Read the CURRENT egress before rotating so the log shows old → new.
+  prev_host=$(python3 - "$state" 2>/dev/null <<'PY' || true
+import sys,json
+try:
+ s=json.load(open(sys.argv[1])); print(s.get('host','?') or '?')
+except Exception: print('?')
+PY
+)
   next=$(pick_next "$meta" "$state" 2>/dev/null || true)
   [[ -n "$next" ]] || return 0
+  # The chosen egress from the meta TSV (tag \t country \t host).
+  read -r ncountry nhost <<< "$(awk -F'\t' -v t="$next" '$1==t{print $2"\t"$3; exit}' "$meta")"
+  port=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0].get("port","?"))' "$cfg" 2>/dev/null || echo '?')
   set_rotate_target "$cfg" "$next"
   start_aux_xray "$cfg" "$logf" "$pidfile"
-  log "Rotate $reason → $next"
+  log "Rotate[$reason]: host $prev_host → $next (${ncountry:-?}, ${nhost:-?}) on port $port"
 }
 
 rotate_loop_1min(){
