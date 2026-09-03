@@ -146,6 +146,9 @@ ENC_PATH_VLESS=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(s
 ENC_PATH_ROTATE1MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE1MIN}")
 ENC_PATH_ROTATE2MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE2MIN}")
 ENC_PATH_ROTATE5MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE5MIN}")
+ENC_PATH_ROTATE_WARP2MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE_WARP2MIN}")
+ENC_PATH_ROTATE_WARP4MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE_WARP4MIN}")
+ENC_PATH_ROTATE_WARP6MIN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_ROTATE_WARP6MIN}")
 ENC_PATH_TROJAN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${PATH_TROJAN}")
 
 # Detect runner country for config remarks (e.g. 🇩🇪-VLESS-WS)
@@ -185,6 +188,9 @@ VMESS_HU_URL="vmess://$(echo -n "$VMESS_HU_JSON" | base64 -w 0)"
 ROTATE1MIN_URL="vless://${UUID_ROTATE1MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE1MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-1min"
 ROTATE2MIN_URL="vless://${UUID_ROTATE2MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE2MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-2min"
 ROTATE5MIN_URL="vless://${UUID_ROTATE5MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE5MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-5min"
+ROTATE_WARP2MIN_URL="vless://${UUID_ROTATE_WARP2MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE_WARP2MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-Warp-2min"
+ROTATE_WARP4MIN_URL="vless://${UUID_ROTATE_WARP4MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE_WARP4MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-Warp-4min"
+ROTATE_WARP6MIN_URL="vless://${UUID_ROTATE_WARP6MIN}@${DOMAIN}:443?type=ws&security=tls&fp=chrome&packetEncoding=xudp&host=${DOMAIN}&path=${ENC_PATH_ROTATE_WARP6MIN}&sni=${DOMAIN}&encryption=none#Gayroxy-🔄-Rotate-Warp-6min"
 
 SOCKS5_URL="socks5://127.0.0.1:${PORT_SOCKS5}#Gayroxy-${COUNTRY_FLAG}-Socks5"
 HTTP_URL="http://127.0.0.1:${PORT_HTTP_PROXY}#Gayroxy-${COUNTRY_FLAG}-HTTP"
@@ -205,6 +211,9 @@ ${VMESS_HU_URL}
 ${ROTATE1MIN_URL}
 ${ROTATE2MIN_URL}
 ${ROTATE5MIN_URL}
+${ROTATE_WARP2MIN_URL}
+${ROTATE_WARP4MIN_URL}
+${ROTATE_WARP6MIN_URL}
 ${REALITY_LOCAL_URL}
 ${SOCKS5_URL}
 ${HTTP_URL}"
@@ -364,7 +373,7 @@ export WORKER_URL DOMAIN
 
 export SUB_B64 VLESS_URL TROJAN_URL VMESS_URL VLESS_GRPC_URL TROJAN_GRPC_URL
 export SS_URL SS_WS_URL SS_GRPC_URL VMESS_GRPC_URL
-export VLESS_HU_URL TROJAN_HU_URL VMESS_HU_URL ROTATE1MIN_URL ROTATE2MIN_URL ROTATE5MIN_URL
+export VLESS_HU_URL TROJAN_HU_URL VMESS_HU_URL ROTATE1MIN_URL ROTATE2MIN_URL ROTATE5MIN_URL ROTATE_WARP2MIN_URL ROTATE_WARP4MIN_URL ROTATE_WARP6MIN_URL
 export REALITY_LOCAL_URL SOCKS5_URL HTTP_URL
 export UUID_VLESS PATH_VLESS TROJAN_PASS PATH_TROJAN UUID_VMESS PATH_VMESS
 export UUID_VLESS_GRPC GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN
@@ -400,12 +409,15 @@ keys = [
     'PATH_VLESS_HU','PATH_TROJAN_HU','PATH_VMESS_HU',
     'UUID_ROTATE1MIN','UUID_ROTATE2MIN','UUID_ROTATE5MIN',
     'PATH_ROTATE1MIN','PATH_ROTATE2MIN','PATH_ROTATE5MIN',
+    'UUID_ROTATE_WARP2MIN','UUID_ROTATE_WARP4MIN','UUID_ROTATE_WARP6MIN',
+    'PATH_ROTATE_WARP2MIN','PATH_ROTATE_WARP4MIN','PATH_ROTATE_WARP6MIN',
     'GRPC_SERVICE_VLESS','GRPC_SERVICE_TROJAN',
     'GRPC_SERVICE_SS','GRPC_SERVICE_VMESS',
     'PORT_SHADOWSOCKS','PORT_REALITY','PORT_SOCKS5','PORT_HTTP_PROXY',
     'REALITY_PUBLIC','DOMAIN','WORKER_URL','REALITY_SNI',
     'EXTERNAL_SUB_URLS','EXTERNAL_SUB_COUNT','GAYROXY_SUB_COUNT','TOTAL_SUB_COUNT',
-    'ROTATE1MIN_URL','ROTATE2MIN_URL','ROTATE5MIN_URL','API_TOKEN',
+    'ROTATE1MIN_URL','ROTATE2MIN_URL','ROTATE5MIN_URL',
+    'ROTATE_WARP2MIN_URL','ROTATE_WARP4MIN_URL','ROTATE_WARP6MIN_URL','API_TOKEN',
 ]
 d = {k: os.environ.get(k, '') for k in keys}
 try:

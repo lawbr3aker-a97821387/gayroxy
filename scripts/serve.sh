@@ -24,6 +24,9 @@ SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-1800}"
 ROTATE1MIN_INTERVAL="${ROTATE1MIN_INTERVAL:-60}"
 ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
 ROTATE5MIN_INTERVAL="${ROTATE5MIN_INTERVAL:-300}"
+ROTATEWARP2MIN_INTERVAL="${ROTATEWARP2MIN_INTERVAL:-120}"
+ROTATEWARP4MIN_INTERVAL="${ROTATEWARP4MIN_INTERVAL:-240}"
+ROTATEWARP6MIN_INTERVAL="${ROTATEWARP6MIN_INTERVAL:-360}"
 PARALLEL_PROBES="${PARALLEL_PROBES:-10}"
 
 mkdir -p "${LOG_DIR}" "${SUB_DIR}" "${XRAY_DIR}"
@@ -185,6 +188,73 @@ else
 fi
 fi   # end RENDER_ONLY else (cloudflared + WARP)
 
+# ─── WARP rotation planes (3 free WARP registrations = 3 distinct IPs) ─────
+# Runs N independent warp-go (viacipher/warp) instances, each on its own SOCKS5
+# port with its own WARP registration, so each plane has a different Cloudflare
+# egress IP/location. The rotation aux xrays cycle through these planes, giving
+# a config that changes identity on demand. Opportunistic: if warp-go won't
+# install or a plane doesn't come up, WARP_PLANES_ACTIVE stays false and the
+# health agent simply writes empty warp rotation configs (graceful degradation).
+WARP_PLANES_ACTIVE=false
+start_warp_planes(){
+  local planedir="${LOG_DIR}/warp-planes"
+  mkdir -p "$planedir"
+  local warpb warpbinst
+  warpbinst=$(command -v warp-go 2>/dev/null || true)
+  if [[ -z "$warpbinst" ]]; then
+    log "Downloading warp-go (free multi-IP WARP)..."
+    local url arch
+    arch=$(uname -m)
+    case "$arch" in
+      x86_64)  url="https://github.com/viacipher/warp/releases/latest/download/warp-go-linux-amd64" ;;
+      aarch64) url="https://github.com/viacipher/warp/releases/latest/download/warp-go-linux-arm64" ;;
+      *)       warn "Unsupported arch for warp planes: $arch"; return 1 ;;
+    esac
+    if ! curl -fsSL --max-time 90 -o "$PWD/warp-go" "$url" 2>/dev/null; then
+      warn "warp-go download failed — WARP identity rotation unavailable"
+      return 1
+    fi
+    chmod +x "$PWD/warp-go"
+    warpbinst="$PWD/warp-go"
+  fi
+
+  local -a ports=($WARP_PLANE_PORTS)
+  [[ ${#ports[@]} -ge 3 ]] || { warn "WARP_PLANE_PORTS must list 3 ports"; return 1; }
+  local p cfg
+  for p in "${ports[@]}"; do
+    cfg="$planedir/plane-$p.json"
+    if [[ ! -f "$cfg" ]]; then
+      # Canonical warp-go config: headless SOCKS5 server; empty SecretKey tells
+      # warp-go to register a fresh free WARP identity on first start, giving
+      # this plane its own egress IP. Kept true by warp-go writing the key back.
+      cat > "$cfg" <<EOF
+{"Device":{"Interface":{"IPv4":"auto","MTU":1280},"Socks5":{"Enable":true,"Listen":"127.0.0.1:$p","Users":null},"SecretKey":null},"Wgcf":{"V4":true,"V6":true}}
+EOF
+    fi
+    ( exec "$warpbinst" -c "$cfg" >> "$planedir/plane-$p.log" 2>&1 ) &
+  done
+
+  # Wait for each SOCKS port + confirm it really egresses through WARP.
+  local ok=0 p probe
+  for p in "${ports[@]}"; do
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      probe=$(curl -fsS --max-time 6 --socks5 "127.0.0.1:$p" https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+      if echo "$probe" | grep -q 'warp='; then
+        log "WARP plane port $p ✓ — distinct egress up"
+        ok=$((ok+1)); break
+      fi
+      sleep 2
+    done
+  done
+  if [[ $ok -ge 1 ]]; then
+    WARP_PLANES_ACTIVE=true
+    log "WARP planes up: $ok/${#ports[@]} — identity rotation available"
+  else
+    warn "No WARP plane came up — identity rotation unavailable (will degrade to existing pool rotation)"
+  fi
+  export WARP_PLANES_ACTIVE WARP_PLANE_PORTS
+}
+
 # ─── Generate credentials ────────────────────────────────────────────────────
 
 # ─── Download geo databases (Iran rules) ────────────────────────────────────
@@ -283,13 +353,15 @@ export XRAY_LOG="${LOG_DIR}/xray.log" \
   PORT_SHADOWSOCKS PORT_REALITY PORT_SOCKS5 PORT_HTTP_PROXY \
   PORT_SS_WS PORT_SS_GRPC PORT_VMESS_GRPC \
   PORT_VLESS_HU PORT_TROJAN_HU PORT_VMESS_HU \
-  WARP_PORT \
+  WARP_PORT WARP_PLANE_PORTS \
+  PORT_ROTATE_WARP2MIN PORT_ROTATE_WARP4MIN PORT_ROTATE_WARP6MIN \
   UUID_VLESS UUID_VLESS_GRPC UUID_VMESS UUID_REALITY \
   TROJAN_PASS SS_PASS \
   PATH_VLESS PATH_TROJAN PATH_VMESS PATH_VLESS_GRPC PATH_TROJAN_GRPC \
   PATH_SS_WS PATH_SS_GRPC PATH_VMESS_GRPC \
   PATH_VLESS_HU PATH_TROJAN_HU PATH_VMESS_HU \
   PATH_ROTATE1MIN UUID_ROTATE1MIN PATH_ROTATE2MIN UUID_ROTATE2MIN PATH_ROTATE5MIN UUID_ROTATE5MIN \
+  PATH_ROTATE_WARP2MIN UUID_ROTATE_WARP2MIN PATH_ROTATE_WARP4MIN UUID_ROTATE_WARP4MIN PATH_ROTATE_WARP6MIN UUID_ROTATE_WARP6MIN \
   GRPC_SERVICE_VLESS GRPC_SERVICE_TROJAN \
   GRPC_SERVICE_SS GRPC_SERVICE_VMESS \
   REALITY_PRIVATE REALITY_PUBLIC SHORT_ID REALITY_SNI
@@ -313,7 +385,7 @@ json.dump(cfg, open(p, 'w'), indent=2)
 fi
 
 # For nginx: only expand OUR variables, leave nginx's own vars ($http_upgrade, etc.)
-NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU $PATH_ROTATE1MIN $PATH_ROTATE2MIN $PATH_ROTATE5MIN'
+NGINX_VARS='$XRAY_DIR $GEO_DIR $LOG_DIR $PORT_NGINX $SUB_DIR $PATH_VLESS $PORT_VLESS $PATH_TROJAN $PORT_TROJAN $PATH_VMESS $PORT_VMESS $PATH_VLESS_GRPC $PORT_VLESS_GRPC $PATH_TROJAN_GRPC $PORT_TROJAN_GRPC $PATH_SS_WS $PORT_SS_WS $PATH_SS_GRPC $PORT_SS_GRPC $PATH_VMESS_GRPC $PORT_VMESS_GRPC $PATH_VLESS_HU $PORT_VLESS_HU $PATH_TROJAN_HU $PORT_TROJAN_HU $PATH_VMESS_HU $PORT_VMESS_HU $PATH_ROTATE1MIN $PATH_ROTATE2MIN $PATH_ROTATE5MIN $PATH_ROTATE_WARP2MIN $PATH_ROTATE_WARP4MIN $PATH_ROTATE_WARP6MIN'
 envsubst "$NGINX_VARS" < templates/nginx.conf.tmpl > "$NGINX_CONF"
 
 # ─── Resolve TUNNEL_DOMAIN (named mode) ──────────────────────────────
@@ -503,11 +575,11 @@ fi
 
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     (
-        export HEALTH_INTERVAL SUBS_REFRESH_INTERVAL ROTATE1MIN_INTERVAL ROTATE2MIN_INTERVAL ROTATE5MIN_INTERVAL PARALLEL_PROBES HEALTH_TIMEOUT DOMAIN WORKER_URL SEED EXTERNAL_SUB_URLS DEFAULT_EXTERNAL_SUB API_TOKEN SUB_DIR PATH_ROTATE1MIN UUID_ROTATE1MIN PATH_ROTATE2MIN UUID_ROTATE2MIN PATH_ROTATE5MIN UUID_ROTATE5MIN WARP_PORT WARP_ACTIVE
+        export HEALTH_INTERVAL SUBS_REFRESH_INTERVAL ROTATE1MIN_INTERVAL ROTATE2MIN_INTERVAL ROTATE5MIN_INTERVAL ROTATEWARP2MIN_INTERVAL ROTATEWARP4MIN_INTERVAL ROTATEWARP6MIN_INTERVAL PARALLEL_PROBES HEALTH_TIMEOUT DOMAIN WORKER_URL SEED EXTERNAL_SUB_URLS DEFAULT_EXTERNAL_SUB API_TOKEN SUB_DIR PATH_ROTATE1MIN UUID_ROTATE1MIN PATH_ROTATE2MIN UUID_ROTATE2MIN PATH_ROTATE5MIN UUID_ROTATE5MIN PATH_ROTATE_WARP2MIN UUID_ROTATE_WARP2MIN PATH_ROTATE_WARP4MIN UUID_ROTATE_WARP4MIN PATH_ROTATE_WARP6MIN UUID_ROTATE_WARP6MIN WARP_PORT WARP_PLANE_PORTS WARP_PLANES_ACTIVE WARP_ACTIVE
         exec ./scripts/agent/health-agent.sh
     ) &
     HEALTH_AGENT_PID=$!
-    log "Health agent started (pid ${HEALTH_AGENT_PID}; intervals 1min=${ROTATE1MIN_INTERVAL}s 2min=${ROTATE2MIN_INTERVAL}s 5min=${ROTATE5MIN_INTERVAL}s; parallel=${PARALLEL_PROBES})"
+    log "Health agent started (pid ${HEALTH_AGENT_PID}; rotation 1min=${ROTATE1MIN_INTERVAL}s 2min=${ROTATE2MIN_INTERVAL}s 5min=${ROTATE5MIN_INTERVAL}s; warp 2min=${ROTATEWARP2MIN_INTERVAL}s 4min=${ROTATEWARP4MIN_INTERVAL}s 6min=${ROTATEWARP6MIN_INTERVAL}s; parallel=${PARALLEL_PROBES})"
 else
     HEALTH_AGENT_PID=""
 fi

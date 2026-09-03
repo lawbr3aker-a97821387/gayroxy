@@ -140,6 +140,34 @@ http {
             proxy_connect_timeout 86400;
         }
 
+        # ── WARP rotation backends (3 planes, distinct egress IPs) ──
+        location $PATH_ROTATE_WARP2MIN {
+            proxy_pass http://127.0.0.1:10040;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 86400;
+            proxy_connect_timeout 86400;
+        }
+
+        location $PATH_ROTATE_WARP4MIN {
+            proxy_pass http://127.0.0.1:10042;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 86400;
+            proxy_connect_timeout 86400;
+        }
+
+        location $PATH_ROTATE_WARP6MIN {
+            proxy_pass http://127.0.0.1:10044;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_read_timeout 86400;
+            proxy_connect_timeout 86400;
+        }
+
         # ── Geo databases (client-side routing rules) ────────────────
         location /geo/ {
             alias $GEO_DIR/;

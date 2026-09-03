@@ -30,6 +30,12 @@ PARALLEL_PROBES="${PARALLEL_PROBES:-10}"
 ROTATE1MIN_INTERVAL="${ROTATE1MIN_INTERVAL:-60}"
 ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
 ROTATE5MIN_INTERVAL="${ROTATE5MIN_INTERVAL:-300}"
+# WARP rotation tiers — cycle the 3 WARP planes (distinct free egress IPs).
+ROTATEWARP2MIN_INTERVAL="${ROTATEWARP2MIN_INTERVAL:-120}"
+ROTATEWARP4MIN_INTERVAL="${ROTATEWARP4MIN_INTERVAL:-240}"
+ROTATEWARP6MIN_INTERVAL="${ROTATEWARP6MIN_INTERVAL:-360}"
+# The 3 WARP plane SOCKS5 ports (each a separate WARP registration = own IP).
+WARP_PLANE_PORTS="${WARP_PLANE_PORTS:-40010 40012 40014}"
 # ─── Paths ────────────────────────────────────────────────────────────────────
 XRAY_BIN="${XRAY_BIN:-$ROOT/xray}"
 DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
@@ -52,6 +58,16 @@ ROTATE2MIN_STATE="$AUX_DIR/rotate2min-state.json"
 ROTATE5MIN_CONFIG="$AUX_DIR/rotate5min.json"
 ROTATE5MIN_META="$AUX_DIR/rotate5min-meta.tsv"
 ROTATE5MIN_STATE="$AUX_DIR/rotate5min-state.json"
+# WARP rotation tier config/meta/state files
+ROTATE_WARP2MIN_CONFIG="$AUX_DIR/rotatewarp2min.json"
+ROTATE_WARP2MIN_META="$AUX_DIR/rotatewarp2min-meta.tsv"
+ROTATE_WARP2MIN_STATE="$AUX_DIR/rotatewarp2min-state.json"
+ROTATE_WARP4MIN_CONFIG="$AUX_DIR/rotatewarp4min.json"
+ROTATE_WARP4MIN_META="$AUX_DIR/rotatewarp4min-meta.tsv"
+ROTATE_WARP4MIN_STATE="$AUX_DIR/rotatewarp4min-state.json"
+ROTATE_WARP6MIN_CONFIG="$AUX_DIR/rotatewarp6min.json"
+ROTATE_WARP6MIN_META="$AUX_DIR/rotatewarp6min-meta.tsv"
+ROTATE_WARP6MIN_STATE="$AUX_DIR/rotatewarp6min-state.json"
 # PIDs for the three aux xray instances + rotation loops. Aux xray PIDs are held
 # in pid files (written by the rotation loops that own them) so the parent
 # cleanup can reach them even though the loops run in subshells.
@@ -62,11 +78,23 @@ ROTATE2MIN_PID="$AUX_DIR/rotate2min.pid"
 # shellcheck disable=SC2034
 ROTATE5MIN_PID="$AUX_DIR/rotate5min.pid"
 # shellcheck disable=SC2034
+ROTATE_WARP2MIN_PID="$AUX_DIR/rotatewarp2min.pid"
+# shellcheck disable=SC2034
+ROTATE_WARP4MIN_PID="$AUX_DIR/rotatewarp4min.pid"
+# shellcheck disable=SC2034
+ROTATE_WARP6MIN_PID="$AUX_DIR/rotatewarp6min.pid"
+# shellcheck disable=SC2034
 LOOP1MIN_PID=""
 # shellcheck disable=SC2034
 LOOP2MIN_PID=""
 # shellcheck disable=SC2034
 LOOP5MIN_PID=""
+# shellcheck disable=SC2034
+LOOP_WARP2MIN_PID=""
+# shellcheck disable=SC2034
+LOOP_WARP4MIN_PID=""
+# shellcheck disable=SC2034
+LOOP_WARP6MIN_PID=""
 ONCE=0
 [[ "${1:-}" == "--once" ]] && ONCE=1
 mkdir -p "$AUX_DIR" "$AUX_LOG" "$SUB_DIR"
@@ -78,12 +106,14 @@ cleanup(){
   # Aux xray PIDs live in pid files (owned by the rotation loops), plus the
   # parent-owned loop PIDs.
   local pf pid
-  for pf in "$ROTATE1MIN_PID" "$ROTATE2MIN_PID" "$ROTATE5MIN_PID"; do
+  for pf in "$ROTATE1MIN_PID" "$ROTATE2MIN_PID" "$ROTATE5MIN_PID" \
+            "$ROTATE_WARP2MIN_PID" "$ROTATE_WARP4MIN_PID" "$ROTATE_WARP6MIN_PID"; do
     pid=$(cat "$pf" 2>/dev/null || true)
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     rm -f "$pf"
   done
-  for pid_var in LOOP1MIN_PID LOOP2MIN_PID LOOP5MIN_PID; do
+  for pid_var in LOOP1MIN_PID LOOP2MIN_PID LOOP5MIN_PID \
+                 LOOP_WARP2MIN_PID LOOP_WARP4MIN_PID LOOP_WARP6MIN_PID; do
     [[ -n "${!pid_var:-}" ]] && kill "${!pid_var}" 2>/dev/null || true
   done
 }
@@ -656,9 +686,10 @@ push_sub(){
 # ─── Health JSON report ────────────────────────────────────────────────────────
 write_health_json(){
   python3 - "$POOL_FILE" "$AUX_DIR/health.json" "$LEADERBOARD" \
-    "$AUX_DIR/rotate1min-state.json" "$AUX_DIR/rotate2min-state.json" "$AUX_DIR/rotate5min-state.json" <<'PY'
+    "$AUX_DIR/rotate1min-state.json" "$AUX_DIR/rotate2min-state.json" "$AUX_DIR/rotate5min-state.json" \
+    "$AUX_DIR/rotatewarp2min-state.json" "$AUX_DIR/rotatewarp4min-state.json" "$AUX_DIR/rotatewarp6min-state.json" <<'PY'
 import sys,json,datetime,collections,os
-p,out,lb_path,r1,r2,r5=sys.argv[1:]
+p,out,lb_path,r1,r2,r5,wr2,wr4,wr6=sys.argv[1:]
 d=collections.defaultdict(list)
 for line in open(p,errors='ignore'):
  parts=line.rstrip('\n').split('\t')
@@ -671,7 +702,7 @@ for sub,entries in lb.items():
  lb_summary[sub]={'topConfigs':[{'latencyMs':e['latency'],'country':e['country']} for e in entries[:10]]}
 result={'checkedAt':datetime.datetime.utcnow().isoformat()+'Z','sources':d,'leaderboard':lb_summary}
 rotations={}
-for tier,state_path in (('1min',r1),('2min',r2),('5min',r5)):
+for tier,state_path in (('1min',r1),('2min',r2),('5min',r5),('warp2min',wr2),('warp4min',wr4),('warp6min',wr6)):
  if not os.path.exists(state_path): continue
  try:
   s=json.load(open(state_path))
@@ -763,7 +794,38 @@ if seed:
 PY
 }
 
-# ─── Pick next rotation target (shared logic) ─────────────────────────────────
+# ─── WARP rotation config ───────────────────────────────────────────────────
+# Builds one aux xray whose outbounds are the 3 WARP planes (distinct free
+# egress IPs). The rotate inbound cycles through them via pick_next, so one
+# client config changes its egress IP/location on a fixed cadence. Meta rows use
+# synthetic host labels (warp-ip-0/1/2) so pick_next sees distinct "hosts" and
+# rotates across all three planes instead of bouncing.
+# $1 = config out, $2 = meta out, $3 = state out, $4 = uuid, $5 = ws path,
+# $6 = listen port
+gen_warp_rotate_config(){
+  local cfg_out="$1" meta_out="$2" state_out="$3" uuid="$4" ws_path="$5" listen_port="$6"
+  python3 - "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$listen_port" <<'PY'
+import sys,json,os
+out,meta_path,state_path,uuid,path,listen_port=sys.argv[1:]
+ports=[int(p) for p in os.environ.get('WARP_PLANE_PORTS','').split() if p.strip()][:3]
+if not ports:
+    # No WARP planes => write an empty config (nothing to proxy) and bail.
+    open(out,'w').write('{}')
+    sys.exit(0)
+obs=[]; meta=[]
+for i,p in enumerate(ports):
+    tag='warp-%d'%i
+    obs.append({'tag':tag,'protocol':'socks','settings':{'servers':[{'address':'127.0.0.1','port':p,'udp':True}]}})
+    # Synthetic distinct host label so pick_next treats each plane as unique.
+    meta.append('%s\tWARP\twarp-ip-%d' % (tag,i))
+c={'log':{'loglevel':'warning'},
+   'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],
+   'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':'warp-0'}]}}
+json.dump(c,open(out,'w'),indent=2)
+open(meta_path,'w').write('\n'.join(meta)+'\n')
+json.dump({'tag':'warp-0','country':'WARP','host':'warp-ip-0'},open(state_path,'w'))
+PY
+}
 pick_next(){ python3 - "$1" "$2" <<'PY'
 import json,sys,os,random
 meta_path,state_path=sys.argv[1],sys.argv[2]
@@ -851,11 +913,12 @@ import sys,json
 cfg_path,lead=sys.argv[1],sys.argv[2]
 d=json.load(open(cfg_path))
 obs=d.get('outbounds',[])
-tags=[o['tag'] for o in obs if isinstance(o.get('tag'),str) and o['tag'].startswith('pool-')]
+# Any named routing target (pool-* external nodes, warp-* WARP planes, direct).
+tags=[o['tag'] for o in obs if isinstance(o.get('tag'),str)]
 if not tags:
     json.dump(d,open(cfg_path,'w'),indent=2); raise SystemExit
 # Honor the requested lead if it actually exists in this config's outbounds,
-# otherwise fall back to the first real pool node. A stale `lead` must never be
+# otherwise fall back to the first one. A stale `lead` must never be
 # referenced: xray 26.x crashes at startup ("not all dependencies are resolved")
 # if a routing target doesn't resolve to an existing outbound.
 target=lead if lead in tags else tags[0]
@@ -935,6 +998,36 @@ rotate_loop_5min(){
   done
 }
 
+rotate_loop_warp_2min(){
+  update_rotate_target "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
+    "$AUX_LOG/rotatewarp2min.log" "$ROTATE_WARP2MIN_PID" "warp2min"
+  while :; do
+    sleep "$ROTATEWARP2MIN_INTERVAL"
+    update_rotate_target "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
+      "$AUX_LOG/rotatewarp2min.log" "$ROTATE_WARP2MIN_PID" "warp2min"
+  done
+}
+
+rotate_loop_warp_4min(){
+  update_rotate_target "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
+    "$AUX_LOG/rotatewarp4min.log" "$ROTATE_WARP4MIN_PID" "warp4min"
+  while :; do
+    sleep "$ROTATEWARP4MIN_INTERVAL"
+    update_rotate_target "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
+      "$AUX_LOG/rotatewarp4min.log" "$ROTATE_WARP4MIN_PID" "warp4min"
+  done
+}
+
+rotate_loop_warp_6min(){
+  update_rotate_target "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
+    "$AUX_LOG/rotatewarp6min.log" "$ROTATE_WARP6MIN_PID" "warp6min"
+  while :; do
+    sleep "$ROTATEWARP6MIN_INTERVAL"
+    update_rotate_target "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
+      "$AUX_LOG/rotatewarp6min.log" "$ROTATE_WARP6MIN_PID" "warp6min"
+  done
+}
+
 # ─── Write all three rotation configs ──────────────────────────────────────────
 write_all_rotate_configs(){
   local main_country
@@ -948,6 +1041,16 @@ write_all_rotate_configs(){
     "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
   gen_rotate_config "$ROTATE5MIN_INTERVAL" 10034 "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
     "${UUID_ROTATE5MIN:-}" "${PATH_ROTATE5MIN:-}" "$main_country" "${DOMAIN}"
+  # WARP rotation tiers — each cycles its own 3-plane WARP set on its cadence.
+  # Only meaningful when the WARP planes (distinct free IPs) are actually up.
+  if [[ "${WARP_PLANES_ACTIVE:-false}" == "true" ]]; then
+    gen_warp_rotate_config "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
+      "${UUID_ROTATE_WARP2MIN:-}" "${PATH_ROTATE_WARP2MIN:-}" 10040
+    gen_warp_rotate_config "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
+      "${UUID_ROTATE_WARP4MIN:-}" "${PATH_ROTATE_WARP4MIN:-}" 10042
+    gen_warp_rotate_config "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
+      "${UUID_ROTATE_WARP6MIN:-}" "${PATH_ROTATE_WARP6MIN:-}" 10044
+  fi
 }
 
 finalize(){
@@ -976,8 +1079,20 @@ main(){
   rotate_loop_5min &
 # shellcheck disable=SC2034
   LOOP5MIN_PID=$!
+  # WARP tiers only when the distinct-IP planes are up.
+  if [[ "${WARP_PLANES_ACTIVE:-false}" == "true" ]]; then
+    rotate_loop_warp_2min &
+# shellcheck disable=SC2034
+    LOOP_WARP2MIN_PID=$!
+    rotate_loop_warp_4min &
+# shellcheck disable=SC2034
+    LOOP_WARP4MIN_PID=$!
+    rotate_loop_warp_6min &
+# shellcheck disable=SC2034
+    LOOP_WARP6MIN_PID=$!
+  fi
 
-  log "Rotation loops started: 1min (port 10030), 2min (port 10032), 5min (port 10034)"
+  log "Rotation loops started: 1min (10030), 2min (10032), 5min (10034); WARP 2min (10040), 4min (10042), 6min (10044)"
   log "Parallel health probes: up to $PARALLEL_PROBES concurrent, ${HEALTH_TIMEOUT}s timeout"
 
   # Two-tier scheduler:

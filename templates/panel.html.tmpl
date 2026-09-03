@@ -863,7 +863,10 @@
     const ROTATION_ALGOS = [
         { key: '1min', label: '🔄 Rotate 1min', desc: 'Rotates exit every 1 minute', intervalSec: 60 },
         { key: '2min', label: '🔄 Rotate 2min', desc: 'Rotates exit every 2 minutes', intervalSec: 120 },
-        { key: '5min', label: '🔄 Rotate 5min', desc: 'Rotates exit every 5 minutes', intervalSec: 300 }
+        { key: '5min', label: '🔄 Rotate 5min', desc: 'Rotates exit every 5 minutes', intervalSec: 300 },
+        { key: 'warp2min', label: '🔄 WARP Rotate 2min', desc: 'WARP exit changes every 2 minutes', intervalSec: 120 },
+        { key: 'warp4min', label: '🔄 WARP Rotate 4min', desc: 'WARP exit changes every 4 minutes', intervalSec: 240 },
+        { key: 'warp6min', label: '🔄 WARP Rotate 6min', desc: 'WARP exit changes every 6 minutes', intervalSec: 360 }
     ];
 
     async function renderRotationStatus() {
