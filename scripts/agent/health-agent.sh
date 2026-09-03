@@ -1090,8 +1090,11 @@ write_all_rotate_configs(){
 finalize(){
   rebuild_pool_from_leaderboard
   write_merged_sub
-  write_health_json
+  # Generate all six rotate configs + state BEFORE publishing health, so the
+  # health.json that reaches the worker reflects the real live rotation tiers
+  # (enabled:true + warpPlanes) instead of the stale enabled:false bootstrap.
   write_all_rotate_configs
+  write_health_json
 }
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
