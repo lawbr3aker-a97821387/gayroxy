@@ -1144,12 +1144,15 @@ rotate_loop_5min(){
 # xray is a single long-lived process holding ALL planes, so every WireGuard
 # session stays warm: flipping egress is an instant API call, NOT a restart with
 # a dead cold-handshake window (which is what made the tier appear broken).
-# $1 = meta (tag\thost lines of live planes), $2 = state, $3 = reason/log label
+# A candidate is only committed AFTER it passes a live probe (override to it,
+# curl through the loopback probe client). If the candidate prove dead the next
+# candidate is tried; if none are live the current plane is kept, so we never
+# pin a dead egress and wait out the whole cadence.
+# $1 = tier, $2 = live TSV (candidates), $3 = state, $4 = full meta (all planes)
 update_warp_target(){
-  local meta="$1" state="$2" reason="$3"
+  local tier="$1" meta="$2" state="$3" full_meta="$4"
   [[ -f "$meta" ]] || return 0
-  local prev_host next api balancer nhost
-  # Read the currently-selected egress + api endpoint + balancer from state.
+  local prev_host api balancer client_port candidate_used=""
   read -r prev_host api balancer <<< "$(python3 - "$state" 2>/dev/null <<'PY' || true
 import sys,json
 try:
@@ -1157,22 +1160,55 @@ try:
 except Exception: print('? 127.0.0.1:10050 warpsel')
 PY
 )"
-  next=$(pick_next "$meta" "$state" 2>/dev/null || true)
-  [[ -n "$next" ]] || return 0
-  read -r _ncountry nhost <<< "$(awk -F'\t' -v t="$next" '$1==t{print $2"\t"$3; exit}' "$meta" 2>/dev/null)"
-  # Override the balancer to pin exactly this plane — warm, no restart.
-  if "$XRAY_BIN" api bo --server="$api" -b "$balancer" "$next" >/dev/null 2>&1; then
-    python3 - "$state" "$next" "$nhost" <<'PY'
+  client_port=$(warp_probe_client_port "$tier")
+  local candidates attempts tag nhost
+  # pick up to N distinct candidate tags from the live set (never the current).
+  mapfile -t candidates < <( python3 - "$meta" "$state" <<'PY' || true
+import json,sys,os,random
+meta_path,state_path=sys.argv[1],sys.argv[2]
+plan=[]
+for line in open(meta_path,errors='ignore'):
+ a=line.rstrip('\n').split('\t')
+ if len(a)==3: plan.append(a)   # [tag, country, host]
+state={}
+if os.path.exists(state_path):
+ try: state=json.load(open(state_path))
+ except: pass
+cur=state.get('tag'); ch=state.get('host')
+random.shuffle(plan)
+# candidates: differ from current host, prefer unused hosts, cap at N.
+out=[]
+for a in plan:
+ if a[0]!=cur and a[2]!=ch and a[0] not in out: out.append(a)
+ if len(out)>=3: break
+if not out:
+ for a in plan:
+  if a[0]!=cur and a[0] not in out: out.append(a)
+  if len(out)>=3: break
+for a in out: print('\t'.join(a))
+PY
+)
+  for line in "${candidates[@]}"; do
+    [[ -n "$line" ]] || continue
+    tag=$(cut -f1 <<<"$line"); nhost=$(cut -f3 <<<"$line")
+    if warp_probe_plane "$tier" "$api" "$balancer" "$tag" "$meta"; then
+      candidate_used="$tag"
+      python3 - "$state" "$tag" "$nhost" "$api" <<'PY'
 import sys,json
-p,tag,host=sys.argv[1:]
+p,tag,host,api=sys.argv[1:]
 try: s=json.load(open(p))
 except Exception: s={}
-s['tag']=tag; s['host']=host
+s['tag']=tag; s['host']=host; s['api']=api; s['balancer']='warpsel'
 json.dump(s,open(p,'w'),indent=2)
 PY
-    log "Rotate[$reason]: host $prev_host → $next (WARP, ${nhost:-?}) via api override"
-  else
-    warn "Rotate[$reason]: bo override failed ($api $balancer $next)"
+      log "Rotate[$tier]: host $prev_host → $tag (WARP, ${nhost:-?}) verified live, override committed"
+      break
+    else
+      warn "Rotate[$tier]: candidate $tag probe DEAD, trying next"
+    fi
+  done
+  if [[ -z "$candidate_used" ]]; then
+    log "Rotate[$tier]: no live candidate, keeping current egress ($prev_host)"
   fi
 }
 
@@ -1182,17 +1218,20 @@ rotate_loop_warp(){
   local tier="$1" live="$2" state="$3" meta="$4" api="$5" uuid="$6" path="$7" tport="$8" interval="$9"
   # A persistent loopback probe client lets us verify each plane end-to-end.
   start_warp_probe_client "$tier" "$tport" "$uuid" "$path"
-  update_warp_target "$live" "$state" "$tier"
+  update_warp_target "$tier" "$live" "$state" "$meta"
   local cycle=0
   while :; do
     sleep "$interval"
     cycle=$((cycle+1))
-    # Refresh plane liveness periodically so dead planes are pruned (and gone
-    # planes recovered by the next pass). Direct-fallback tiers skip probing.
-    if [[ -n "$api" ]]; then
+    # Refresh plane liveness periodically (every ~20 min) so long-dead planes
+    # are pruned from candidates and gone planes recover. Direct-fallback tiers
+    # skip probing. The per-rotation probe-before-commit already guarantees each
+    # override lands only on a verified-live plane, so we keep this sparse to
+    # avoid hammering the WARP API with constant handshakes.
+    if [[ $((cycle % 10)) -eq 0 ]] && [[ -n "$api" ]]; then
       warp_refresh_liveness "$tier" "$live" "127.0.0.1:$api" "warpsel" "$meta" || true
     fi
-    update_warp_target "$live" "$state" "$tier"
+    update_warp_target "$tier" "$live" "$state" "$meta"
   done
 }
 
