@@ -208,47 +208,89 @@ export XRAY_DIR GEO_DIR LOG_DIR SUB_DIR PORT_NGINX \
 # Registers ONE fresh free WARP identity via Cloudflare's public API (the same
 # endpoint wgcf / warp-reg use) and prints a JSON line for xray's native
 # `wireguard` outbound. Prints nothing on failure (caller degrades to its own
-# fallback). No third-party binary needed — uses openssl/python cryptography
-# already present on ubuntu runners to build the x25519 keypair.
+# fallback). No third-party binary needed — builds the x25519 keypair with
+# python-cryptography when present, else openssl.
 warp_register() {
-  local out
-  out=$(python3 - <<'PY' 2>/dev/null
-import base64, json, os, urllib.request
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from cryptography.hazmat.primitives import serialization
+  local out err
+  err=$(mktemp)
+  out=$(python3 - "$(command -v openssl || true)" <<'PY' 2>"$err"
+import base64, json, os, sys, subprocess, urllib.request
+openssl = sys.argv[1] if len(sys.argv) > 1 else ""
+priv_bytes = pub_b = None
 try:
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
     priv = X25519PrivateKey.generate()
     pub_b = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    body = json.dumps({
-        "key": base64.b64encode(pub_b).decode(),
-        "install_id": "", "fcm_token": "",
-        "tos": "2024-01-01T00:00:00.000Z",
-        "model": "Linux (Gayroxy)", "serial_number": os.urandom(8).hex(),
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.cloudflareclient.com/v0a2158/reg",
-        data=body, method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "okhttp/3.12.1"})
-    with urllib.request.urlopen(req, timeout=25) as r:
-        d = json.load(r)
-    acc = d["config"]["peers"][0]
-    reserved = d["config"]["client"]["config"].get("client_id") or [0,0,0]
-    if isinstance(reserved, str):
-        reserved = [0,0,0]
-    print(json.dumps({
-        "secretKey": base64.b64encode(
-            priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-        ).decode(),
-        "publicKey": acc["public_key"],
-        "endpoint": acc["endpoint"]["host"] + ":" + str(acc["endpoint"]["port"]),
-        "address": d["config"]["client"]["interface"]["addresses"]["v4"] + "/32",
-        "v6": d["config"]["client"]["interface"]["addresses"].get("v6", ""),
-        "reserved": reserved,
-    }))
+    priv_bytes = priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
 except Exception:
-    raise SystemExit(1)
+    if not openssl:
+        sys.exit(2)
+    # openssl path: generate raw x25519, print PEM-ish base64 of the private key
+    p = subprocess.run([openssl, "genpkey", "-algorithm", "X25519", "-outform", "DER"],
+                       capture_output=True, timeout=20)
+    if p.returncode != 0 or not p.stdout:
+        sys.exit(3)
+    try:
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
+        from cryptography.hazmat.primitives.serialization import load_der_private_key
+        key = load_der_private_key(p.stdout, password=None)
+        priv_bytes = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+        pub_b = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    except Exception:
+        sys.exit(4)
+if not (priv_bytes and pub_b):
+    sys.exit(5)
+body = json.dumps({
+    "key": base64.b64encode(pub_b).decode(),
+    "install_id": "", "fcm_token": "",
+    "tos": "2024-01-01T00:00:00.000Z",
+    "model": "Linux (Gayroxy)", "serial_number": os.urandom(8).hex(),
+}).encode()
+req = urllib.request.Request(
+    "https://api.cloudflareclient.com/v0a2158/reg",
+    data=body, method="POST",
+    headers={"Content-Type": "application/json", "User-Agent": "okhttp/3.12.1"})
+try:
+    with urllib.request.urlopen(req, timeout=30) as r:
+        d = json.load(r)
+except Exception as e:
+    sys.stderr.write("CF_HTTP_ERR " + repr(e) + "\n")
+    sys.exit(6)
+acc = d["config"]["peers"][0]
+# wgcf-compatible shape: client_id and interface sit directly under config.
+rv = d.get("config", {}).get("client_id") or [0, 0, 0]
+if isinstance(rv, str):
+    try:
+        rv = list(base64.b64decode(rv))
+        if len(rv) < 3:
+            rv = [0, 0, 0]
+    except Exception:
+        rv = [0, 0, 0]
+# Real response: endpoint.host is "engage.cloudflareclient.com:2408" (port
+# included, no separate "port" key). Fall back to v4/ports if host is absent.
+ep = acc.get("endpoint", {})
+endpoint = ep.get("host") or (ep.get("v4") or "")
+if ":" not in endpoint.rsplit("]", 1)[-1]:
+    ports = ep.get("ports") or [2408]
+    endpoint = endpoint.rsplit(":", 1)[0] + ":" + str(ports[0]) if endpoint else \
+        "engage.cloudflareclient.com:" + str(ports[0])
+print(json.dumps({
+    "secretKey": base64.b64encode(priv_bytes).decode(),
+    "publicKey": acc["public_key"],
+    "endpoint": endpoint,
+    "address": d["config"]["interface"]["addresses"]["v4"] + "/32",
+    "v6": d["config"]["interface"]["addresses"].get("v6", ""),
+    "reserved": rv[:3],
+}))
 PY
   )
+  if [[ -s "$err" ]]; then
+    # Diagnose registration failures without leaking response bodies.
+    local why; why=$(tr '\n' ' ' < "$err" | cut -c1-240)
+    warn "warp_register: $why"
+  fi
+  rm -f "$err"
   [[ -n "$out" ]] && printf '%s\n' "$out"
 }
 
