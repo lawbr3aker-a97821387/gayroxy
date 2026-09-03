@@ -34,8 +34,9 @@ ROTATE5MIN_INTERVAL="${ROTATE5MIN_INTERVAL:-300}"
 ROTATEWARP2MIN_INTERVAL="${ROTATEWARP2MIN_INTERVAL:-120}"
 ROTATEWARP4MIN_INTERVAL="${ROTATEWARP4MIN_INTERVAL:-240}"
 ROTATEWARP6MIN_INTERVAL="${ROTATEWARP6MIN_INTERVAL:-360}"
-# The 3 WARP plane SOCKS5 ports (each a separate WARP registration = own IP).
-WARP_PLANE_PORTS="${WARP_PLANE_PORTS:-40010 40012 40014}"
+# WARP planes are cred files under WARP_PLANE_DIR (registered by serve.sh);
+# WARP_PLANE_DIR/WARP_PLANE_COUNT come from lib/common.sh.
+WARP_PLANE_DIR="${WARP_PLANE_DIR:-${LOG_DIR}/warp-planes}"
 # ─── Paths ────────────────────────────────────────────────────────────────────
 XRAY_BIN="${XRAY_BIN:-$ROOT/xray}"
 DOMAIN="${DOMAIN:-tunnel-coming-on-first-run.trycloudflare.com}"
@@ -710,10 +711,15 @@ for tier,state_path in (('1min',r1),('2min',r2),('5min',r5),('warp2min',wr2),('w
    rotations[tier]={'tag':s.get('tag'),'country':s.get('country'),'host':s.get('host')}
  except Exception: pass
 if rotations:
- result['rotations']=rotations
- result['rotation']={'enabled':True,'algorithms':sorted(rotations.keys())}
+  result['rotations']=rotations
+  result['rotation']={'enabled':True,'algorithms':sorted(rotations.keys())}
+  try:
+   import glob as _g
+   result['rotation']['warpPlanes']=len(_g.glob(os.path.join(os.environ.get('WARP_PLANE_DIR','/nonexistent'),'plane-*.json')))
+  except Exception:
+   pass
 else:
- result['rotation']={'enabled':False}
+  result['rotation']={'enabled':False}
 json.dump(result,open(out,'w'),ensure_ascii=False,indent=2)
 PY
   if [[ -n "$WORKER_URL" ]]; then
@@ -805,25 +811,44 @@ PY
 gen_warp_rotate_config(){
   local cfg_out="$1" meta_out="$2" state_out="$3" uuid="$4" ws_path="$5" listen_port="$6"
   python3 - "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$listen_port" <<'PY'
-import sys,json,os
+import sys,json,os,glob
 out,meta_path,state_path,uuid,path,listen_port=sys.argv[1:]
-ports=[int(p) for p in os.environ.get('WARP_PLANE_PORTS','').split() if p.strip()][:3]
-if not ports:
-    # No WARP planes => write an empty config (nothing to proxy) and bail.
-    open(out,'w').write('{}')
-    sys.exit(0)
-obs=[]; meta=[]
-for i,p in enumerate(ports):
-    tag='warp-%d'%i
-    obs.append({'tag':tag,'protocol':'socks','settings':{'servers':[{'address':'127.0.0.1','port':p,'udp':True}]}})
-    # Synthetic distinct host label so pick_next treats each plane as unique.
-    meta.append('%s\tWARP\twarp-ip-%d' % (tag,i))
+creds=[]
+for f in sorted(glob.glob(os.path.join(os.environ.get('WARP_PLANE_DIR','/nonexistent'),'plane-*.json'))):
+    try:
+        d=json.load(open(f))
+        if d.get('secretKey') and d.get('address'):
+            creds.append(d)
+    except Exception:
+        pass
+obs=[]
+# xray native wireguard outbound per registered plane => distinct egress IP.
+for i,d in enumerate(creds[:8]):
+    obs.append({'tag':'warp-%d'%i,'protocol':'wireguard','settings':{
+        'secretKey':d['secretKey'],
+        'address':[d['address']],
+        'peers':[{'publicKey':d.get('publicKey','bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo='),
+                  'endpoint':d.get('endpoint','engage.cloudflareclient.com:2408'),
+                  'keepAlive':30}],
+        'reserved':d.get('reserved',[0,0,0]),
+        'mtu':1280}})
+# Fallback: if no WARP plane registered, still expose a working tier (direct),
+# so the config is never a dead 502. Identity won't vary, but egress works.
+if not obs:
+    obs.append({'tag':'warp-0','protocol':'freedom'})
+meta=[]
+for i,o in enumerate(obs):
+    host='warp-plane-%d'%i if o['protocol']=='wireguard' else 'direct'
+    meta.append('%s\tWARP\t%s' % (o['tag'],host))
 c={'log':{'loglevel':'warning'},
-   'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless','settings':{'clients':[{'id':uuid}],'decryption':'none'},'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],
-   'outbounds':obs,'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':'warp-0'}]}}
+   'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless',
+                'settings':{'clients':[{'id':uuid}],'decryption':'none'},
+                'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],
+   'outbounds':obs,
+   'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':obs[0]['tag']}]}}
 json.dump(c,open(out,'w'),indent=2)
 open(meta_path,'w').write('\n'.join(meta)+'\n')
-json.dump({'tag':'warp-0','country':'WARP','host':'warp-ip-0'},open(state_path,'w'))
+json.dump({'tag':obs[0]['tag'],'country':'WARP','host':meta[0].split('\t')[2]},open(state_path,'w'))
 PY
 }
 pick_next(){ python3 - "$1" "$2" <<'PY'
@@ -1028,7 +1053,13 @@ rotate_loop_warp_6min(){
   done
 }
 
-# ─── Write all three rotation configs ──────────────────────────────────────────
+# ─── Write all six rotation configs ────────────────────────────────────────────
+# Generates and LAUNCHES each tier's aux xray so the backend is live immediately
+# (starts here AND in each loop keeps it bound to the currently selected target).
+# The rotation loops later re-point them; they never 5xx because the aux xray is
+# always up. WARP tiers are generated unconditionally: with plane creds present
+# they rotate across distinct egress IPs; without them they fall back to direct
+# (still working) so the advertised URLs are never dead.
 write_all_rotate_configs(){
   local main_country
   main_country=$(curl -fsS --max-time 5 'http://ip-api.com/json?fields=countryCode' 2>/dev/null \
@@ -1037,20 +1068,23 @@ write_all_rotate_configs(){
 
   gen_rotate_config "$ROTATE1MIN_INTERVAL" 10030 "$ROTATE1MIN_CONFIG" "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" \
     "${UUID_ROTATE1MIN:-}" "${PATH_ROTATE1MIN:-}" "$main_country" "${DOMAIN}"
+  start_aux_xray "$ROTATE1MIN_CONFIG" "$AUX_LOG/rotate1min.log" "$ROTATE1MIN_PID"
   gen_rotate_config "$ROTATE2MIN_INTERVAL" 10032 "$ROTATE2MIN_CONFIG" "$ROTATE2MIN_META" "$ROTATE2MIN_STATE" \
     "${UUID_ROTATE2MIN:-}" "${PATH_ROTATE2MIN:-}" "$main_country" "${DOMAIN}"
+  start_aux_xray "$ROTATE2MIN_CONFIG" "$AUX_LOG/rotate2min.log" "$ROTATE2MIN_PID"
   gen_rotate_config "$ROTATE5MIN_INTERVAL" 10034 "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
     "${UUID_ROTATE5MIN:-}" "${PATH_ROTATE5MIN:-}" "$main_country" "${DOMAIN}"
-  # WARP rotation tiers — each cycles its own 3-plane WARP set on its cadence.
-  # Only meaningful when the WARP planes (distinct free IPs) are actually up.
-  if [[ "${WARP_PLANES_ACTIVE:-false}" == "true" ]]; then
-    gen_warp_rotate_config "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
-      "${UUID_ROTATE_WARP2MIN:-}" "${PATH_ROTATE_WARP2MIN:-}" 10040
-    gen_warp_rotate_config "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
-      "${UUID_ROTATE_WARP4MIN:-}" "${PATH_ROTATE_WARP4MIN:-}" 10042
-    gen_warp_rotate_config "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
-      "${UUID_ROTATE_WARP6MIN:-}" "${PATH_ROTATE_WARP6MIN:-}" 10044
-  fi
+  start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" "$ROTATE5MIN_PID"
+  # WARP tiers — rotate across the registered WARP planes on their cadence.
+  gen_warp_rotate_config "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
+    "${UUID_ROTATE_WARP2MIN:-}" "${PATH_ROTATE_WARP2MIN:-}" 10040
+  start_aux_xray "$ROTATE_WARP2MIN_CONFIG" "$AUX_LOG/rotatewarp2min.log" "$ROTATE_WARP2MIN_PID"
+  gen_warp_rotate_config "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
+    "${UUID_ROTATE_WARP4MIN:-}" "${PATH_ROTATE_WARP4MIN:-}" 10042
+  start_aux_xray "$ROTATE_WARP4MIN_CONFIG" "$AUX_LOG/rotatewarp4min.log" "$ROTATE_WARP4MIN_PID"
+  gen_warp_rotate_config "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
+    "${UUID_ROTATE_WARP6MIN:-}" "${PATH_ROTATE_WARP6MIN:-}" 10044
+  start_aux_xray "$ROTATE_WARP6MIN_CONFIG" "$AUX_LOG/rotatewarp6min.log" "$ROTATE_WARP6MIN_PID"
 }
 
 finalize(){
@@ -1079,18 +1113,17 @@ main(){
   rotate_loop_5min &
 # shellcheck disable=SC2034
   LOOP5MIN_PID=$!
-  # WARP tiers only when the distinct-IP planes are up.
-  if [[ "${WARP_PLANES_ACTIVE:-false}" == "true" ]]; then
-    rotate_loop_warp_2min &
+  # WARP tiers always run: with planes they rotate distinct egress IPs, without
+  # planes the config degrades to direct so the URLs still work.
+  rotate_loop_warp_2min &
 # shellcheck disable=SC2034
-    LOOP_WARP2MIN_PID=$!
-    rotate_loop_warp_4min &
+  LOOP_WARP2MIN_PID=$!
+  rotate_loop_warp_4min &
 # shellcheck disable=SC2034
-    LOOP_WARP4MIN_PID=$!
-    rotate_loop_warp_6min &
+  LOOP_WARP4MIN_PID=$!
+  rotate_loop_warp_6min &
 # shellcheck disable=SC2034
-    LOOP_WARP6MIN_PID=$!
-  fi
+  LOOP_WARP6MIN_PID=$!
 
   log "Rotation loops started: 1min (10030), 2min (10032), 5min (10034); WARP 2min (10040), 4min (10042), 6min (10044)"
   log "Parallel health probes: up to $PARALLEL_PROBES concurrent, ${HEALTH_TIMEOUT}s timeout"

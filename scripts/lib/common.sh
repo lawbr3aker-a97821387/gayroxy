@@ -42,7 +42,11 @@ WARP_PORT="${WARP_PORT:-40000}"
 # Each plane is an independent WARP client on its own SOCKS5 port with its own
 # registration identity, so each yields a different Cloudflare egress IP. The
 # aux xrays rotate among these planes to change identity/location/IP on demand.
-WARP_PLANE_PORTS="${WARP_PLANE_PORTS:-40010 40012 40014}"
+# Each plane = one FREE Cloudflare WARP WireGuard identity (distinct egress IP),
+# registered at runtime and persisted as a JSON cred file under WARP_PLANE_DIR.
+# We use xray's NATIVE wireguard outbound — no third-party warp binary/daemon.
+WARP_PLANE_DIR="${WARP_PLANE_DIR:-${LOG_DIR}/warp-planes}"
+WARP_PLANE_COUNT="${WARP_PLANE_COUNT:-3}"
 PORT_ROTATE_WARP2MIN=10040
 PORT_ROTATE_WARP4MIN=10042
 PORT_ROTATE_WARP6MIN=10044
@@ -187,7 +191,7 @@ export XRAY_DIR GEO_DIR LOG_DIR SUB_DIR PORT_NGINX \
   PORT_SHADOWSOCKS PORT_REALITY PORT_SOCKS5 PORT_HTTP_PROXY \
   PORT_SS_WS PORT_SS_GRPC PORT_VMESS_GRPC \
   PORT_VLESS_HU PORT_TROJAN_HU PORT_VMESS_HU \
-  WARP_PORT WARP_PLANE_PORTS \
+  WARP_PORT WARP_PLANE_DIR WARP_PLANE_COUNT \
   PORT_ROTATE_WARP2MIN PORT_ROTATE_WARP4MIN PORT_ROTATE_WARP6MIN \
   PATH_VLESS PATH_TROJAN PATH_VMESS PATH_VLESS_GRPC PATH_TROJAN_GRPC \
   PATH_SS_WS PATH_SS_GRPC PATH_VMESS_GRPC \
@@ -199,6 +203,54 @@ export XRAY_DIR GEO_DIR LOG_DIR SUB_DIR PORT_NGINX \
   TROJAN_PASS SS_PASS \
   UUID_VLESS UUID_VLESS_GRPC UUID_VMESS UUID_REALITY \
   REALITY_PRIVATE REALITY_PUBLIC SHORT_ID REALITY_SNI
+
+# ─── WARP plane registration (free Cloudflare WireGuard identities) ─────────
+# Registers ONE fresh free WARP identity via Cloudflare's public API (the same
+# endpoint wgcf / warp-reg use) and prints a JSON line for xray's native
+# `wireguard` outbound. Prints nothing on failure (caller degrades to its own
+# fallback). No third-party binary needed — uses openssl/python cryptography
+# already present on ubuntu runners to build the x25519 keypair.
+warp_register() {
+  local out
+  out=$(python3 - <<'PY' 2>/dev/null
+import base64, json, os, urllib.request
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+try:
+    priv = X25519PrivateKey.generate()
+    pub_b = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    body = json.dumps({
+        "key": base64.b64encode(pub_b).decode(),
+        "install_id": "", "fcm_token": "",
+        "tos": "2024-01-01T00:00:00.000Z",
+        "model": "Linux (Gayroxy)", "serial_number": os.urandom(8).hex(),
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.cloudflareclient.com/v0a2158/reg",
+        data=body, method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": "okhttp/3.12.1"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        d = json.load(r)
+    acc = d["config"]["peers"][0]
+    reserved = d["config"]["client"]["config"].get("client_id") or [0,0,0]
+    if isinstance(reserved, str):
+        reserved = [0,0,0]
+    print(json.dumps({
+        "secretKey": base64.b64encode(
+            priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+        ).decode(),
+        "publicKey": acc["public_key"],
+        "endpoint": acc["endpoint"]["host"] + ":" + str(acc["endpoint"]["port"]),
+        "address": d["config"]["client"]["interface"]["addresses"]["v4"] + "/32",
+        "v6": d["config"]["client"]["interface"]["addresses"].get("v6", ""),
+        "reserved": reserved,
+    }))
+except Exception:
+    raise SystemExit(1)
+PY
+  )
+  [[ -n "$out" ]] && printf '%s\n' "$out"
+}
 
 # ─── DOMAIN resolution (shared across independent runners) ───────────────────
 # Every job computes the SAME DOMAIN deterministically so sub/panel/boot-verify

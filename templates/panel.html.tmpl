@@ -916,6 +916,8 @@
             '<div style="font-size:11px;color:var(--text2);padding:0 4px;">' +
                 'Last check: ' + (health.checkedAt ? new Date(health.checkedAt).toLocaleString() : 'never') +
                 '&nbsp;&middot;&nbsp; Client configs are <b>fixed</b> — only the exit backend changes.' +
+                (health.rotation && health.rotation.warpPlanes ?
+                    '<br>WARP planes: <b>' + health.rotation.warpPlanes + '</b> distinct egress IPs (free registrations)' : '') +
             '</div>' +
         '</div>';
     }
