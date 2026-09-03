@@ -63,12 +63,15 @@ ROTATE5MIN_STATE="$AUX_DIR/rotate5min-state.json"
 ROTATE_WARP2MIN_CONFIG="$AUX_DIR/rotatewarp2min.json"
 ROTATE_WARP2MIN_META="$AUX_DIR/rotatewarp2min-meta.tsv"
 ROTATE_WARP2MIN_STATE="$AUX_DIR/rotatewarp2min-state.json"
+WARP2MIN_LIVE="$AUX_DIR/rotatewarp2min-live.tsv"
 ROTATE_WARP4MIN_CONFIG="$AUX_DIR/rotatewarp4min.json"
 ROTATE_WARP4MIN_META="$AUX_DIR/rotatewarp4min-meta.tsv"
 ROTATE_WARP4MIN_STATE="$AUX_DIR/rotatewarp4min-state.json"
+WARP4MIN_LIVE="$AUX_DIR/rotatewarp4min-live.tsv"
 ROTATE_WARP6MIN_CONFIG="$AUX_DIR/rotatewarp6min.json"
 ROTATE_WARP6MIN_META="$AUX_DIR/rotatewarp6min-meta.tsv"
 ROTATE_WARP6MIN_STATE="$AUX_DIR/rotatewarp6min-state.json"
+WARP6MIN_LIVE="$AUX_DIR/rotatewarp6min-live.tsv"
 # PIDs for the three aux xray instances + rotation loops. Aux xray PIDs are held
 # in pid files (written by the rotation loops that own them) so the parent
 # cleanup can reach them even though the loops run in subshells.
@@ -114,8 +117,16 @@ cleanup(){
     rm -f "$pf"
   done
   for pid_var in LOOP1MIN_PID LOOP2MIN_PID LOOP5MIN_PID \
-                 LOOP_WARP2MIN_PID LOOP_WARP4MIN_PID LOOP_WARP6MIN_PID; do
+                 LOOP_WARP2MIN_PID LOOP_WARP4MIN_PID LOOP_WARP6MIN_PID \
+                 WARP2MIN_PROBE_PID WARP4MIN_PROBE_PID WARP6MIN_PROBE_PID; do
     [[ -n "${!pid_var:-}" ]] && kill "${!pid_var}" 2>/dev/null || true
+  done
+  # Warp probe-client pids live in pid files too.
+  for pf in "$AUX_DIR/warp2min-probe-client.pid" "$AUX_DIR/warp4min-probe-client.pid" \
+            "$AUX_DIR/warp6min-probe-client.pid"; do
+    pid=$(cat "$pf" 2>/dev/null || true)
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$pf"
   done
 }
 trap cleanup INT TERM EXIT
@@ -801,18 +812,20 @@ PY
 }
 
 # ─── WARP rotation config ───────────────────────────────────────────────────
-# Builds one aux xray whose outbounds are the 3 WARP planes (distinct free
-# egress IPs). The rotate inbound cycles through them via pick_next, so one
-# client config changes its egress IP/location on a fixed cadence. Meta rows use
-# synthetic host labels (warp-ip-0/1/2) so pick_next sees distinct "hosts" and
-# rotates across all three planes instead of bouncing.
+# Builds ONE aux xray holding ALL registered WARP planes (distinct free egress
+# IPs) as a single warm process. The rotate inbound goes through a selector
+# balancer; a rotation is applied via the Xray gRPC API (`bo` balancer override)
+# so the process is NEVER restarted — every plane's WireGuard session stays
+# warm, so flipping egress is instant instead of an N-second dead handshake.
+# Planes that fail liveness are dropped from the balancer so rotation never
+# lands on a dead egress.
 # $1 = config out, $2 = meta out, $3 = state out, $4 = uuid, $5 = ws path,
-# $6 = listen port
+# $6 = listen port, $7 = api port, $8 = liveness out (list of live plane tags)
 gen_warp_rotate_config(){
-  local cfg_out="$1" meta_out="$2" state_out="$3" uuid="$4" ws_path="$5" listen_port="$6"
-  python3 - "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$listen_port" <<'PY'
+  local cfg_out="$1" meta_out="$2" state_out="$3" uuid="$4" ws_path="$5" listen_port="$6" api_port="$7" live_out="$8"
+  python3 - "$cfg_out" "$meta_out" "$state_out" "$uuid" "$ws_path" "$listen_port" "$api_port" "$live_out" <<'PY'
 import sys,json,os,glob
-out,meta_path,state_path,uuid,path,listen_port=sys.argv[1:]
+out,meta_path,state_path,uuid,path,listen_port,api_port,live_out=sys.argv[1:]
 creds=[]
 for f in sorted(glob.glob(os.path.join(os.environ.get('WARP_PLANE_DIR','/nonexistent'),'plane-*.json'))):
     try:
@@ -829,26 +842,51 @@ for i,d in enumerate(creds[:8]):
         'address':[d['address']],
         'peers':[{'publicKey':d.get('publicKey','bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo='),
                   'endpoint':d.get('endpoint','engage.cloudflareclient.com:2408'),
-                  'keepAlive':30}],
+                  'keepAlive':25}],
         'reserved':d.get('reserved',[0,0,0]),
         'mtu':1280}})
-# Fallback: if no WARP plane registered, still expose a working tier (direct),
-# so the config is never a dead 502. Identity won't vary, but egress works.
+live=[]
+# If NO plane is usable, expose a direct fallback so the tier is never a 502.
 if not obs:
-    obs.append({'tag':'warp-0','protocol':'freedom'})
+    obs.append({'tag':'warp-0','protocol':'freedom','settings':{}})
+    live=['warp-0']
+else:
+    live=[o['tag'] for o in obs]
 meta=[]
 for i,o in enumerate(obs):
     host='warp-plane-%d'%i if o['protocol']=='wireguard' else 'direct'
     meta.append('%s\tWARP\t%s' % (o['tag'],host))
-c={'log':{'loglevel':'warning'},
-   'inbounds':[{'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless',
-                'settings':{'clients':[{'id':uuid}],'decryption':'none'},
-                'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],
-   'outbounds':obs,
-   'routing':{'rules':[{'type':'field','inboundTag':['rotate'],'outboundTag':obs[0]['tag']}]}}
-json.dump(c,open(out,'w'),indent=2)
 open(meta_path,'w').write('\n'.join(meta)+'\n')
-json.dump({'tag':obs[0]['tag'],'country':'WARP','host':meta[0].split('\t')[2]},open(state_path,'w'))
+# Live-out file mirrors the meta TSV (tag\tWARP\thost) so pick_next and the
+# balancer-override lookup consume the same format. It is refreshed by the
+# warp liveness pass to drop dead planes from rotation.
+live_tsv=[m for m in meta if m.split('\t')[0] in live]
+open(live_out,'w').write('\n'.join(live_tsv)+'\n')
+# To override a balancer we need a gRPC API path. xray exposes it through a
+# dokodemo-door inbound tagged 'api' forwarding to the api service.
+c={'log':{'loglevel':'warning'},
+   'api':{'tag':'api','services':['HandlerService','LoggerService','StatsService','RoutingService']},
+   'inbounds':[
+       {'tag':'rotate','listen':'127.0.0.1','port':int(listen_port),'protocol':'vless',
+        'settings':{'clients':[{'id':uuid}],'decryption':'none'},
+        'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}},
+       {'listen':'127.0.0.1','port':int(api_port),'protocol':'dokodemo-door','tag':'api-in',
+        'settings':{'address':'127.0.0.1'}}
+   ],
+   'outbounds':obs,
+   'routing':{
+       'domainStrategy':'AsIs',
+       'balancers':[{'tag':'warpsel','selector':['warp-']}],
+       'rules':[
+           {'type':'field','inboundTag':['rotate'],'balancerTag':'warpsel'},
+           {'type':'field','inboundTag':['api-in'],'outboundTag':'api'}
+       ]}}
+json.dump(c,open(out,'w'),indent=2)
+# State: which outbound is currently selected (the single live lead, or the
+# fallback direct) plus the api server address used for `bo` overrides.
+lead = live[0] if live else obs[0]['tag']
+json.dump({'tag':lead,'country':'WARP','host':meta[0].split('\t')[2],
+           'api':'127.0.0.1:%d'%int(api_port),'balancer':'warpsel'},open(state_path,'w'))
 PY
 }
 pick_next(){ python3 - "$1" "$2" <<'PY'
@@ -993,6 +1031,84 @@ PY
   log "Rotate[$reason]: host $prev_host → $next (${ncountry:-?}, ${nhost:-?}) on port $port"
 }
 
+# ─── WARP plane liveness ─────────────────────────────────────────────────────
+# Warp liveness is folded into the rotation: each warp tier owns one persistent
+# aux xray (all planes, warm) plus one persistent loopback SOCKS client whose
+# outbound is that tier's vless/ws inbound. To probe a plane we override the
+# tier balancer to that plane, curl through the loopback client, and mark the
+# plane live or drop it from the tier's rotation set (live TSV).
+# $1 = tier identity (unique per tier: name), $2 = tier listen port,
+# $3 = vless uuid, $4 = ws path, $5 = tier api port, $6 = live TSV path
+warp_probe_client_port(){ # stable per-tier client socks port
+  case "$1" in
+    warp2min) echo 10060 ;;
+    warp4min) echo 10062 ;;
+    warp6min) echo 10064 ;;
+  esac
+}
+
+start_warp_probe_client(){
+  local tier="$1" tier_port="$2" uuid="$3" path="$4" client_port
+  client_port=$(warp_probe_client_port "$tier")
+  # A stable loopback client: socks-in -> vless/ws out to the tier on localhost.
+  local cfg="$AUX_DIR/${tier}-probe-client.json" pid="$AUX_DIR/${tier}-probe-client.pid"
+  local pcppid="${tier^^}_PROBE_PID"
+  if [[ -f "$cfg" ]]; then :; else
+    python3 - "$cfg" "$client_port" "$tier_port" "$uuid" "$path" <<'PY'
+import sys,json
+cfg,cp,tp,u,path=sys.argv[1:]
+json.dump({'log':{'loglevel':'error'},
+ 'inbounds':[{'tag':'s','listen':'127.0.0.1','port':int(cp),'protocol':'socks','settings':{'udp':False}}],
+ 'outbounds':[{'tag':'tier','protocol':'vless',
+   'settings':{'vnext':[{'address':'127.0.0.1','port':int(tp),'users':[{'id':u,'encryption':'none'}]}]},
+   'streamSettings':{'network':'ws','security':'none','wsSettings':{'path':path}}}],
+ 'routing':{'rules':[{'type':'field','inboundTag':['s'],'outboundTag':'tier'}]}},open(cfg,'w'),indent=2)
+PY
+  fi
+  if ! kill -0 "$(cat "$pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+    "$XRAY_BIN" run -c "$cfg" >/dev/null 2>&1 &
+    echo $! > "$pid"
+    # shellcheck disable=SC2034
+    eval "${pcppid}=$!"
+  fi
+}
+
+# Probe a SINGLE plane on a tier. Overrides the balancer to `tag`, curls through
+# the loopback client, then records live/dead.
+warp_probe_plane(){
+  local tier="$1" tier_api="$2" balancer="$3" tag="$4" live_tsv="$5" client_port
+  client_port=$(warp_probe_client_port "$tier")
+  if "$XRAY_BIN" api bo --server="$tier_api" -b "$balancer" "$tag" >/dev/null 2>&1; then
+    local ip
+    ip=$(curl -fsS --max-time 8 --proxy "socks5h://127.0.0.1:$client_port" \
+         'https://api.ipify.org?format=json' 2>/dev/null || true)
+    [[ -n "$ip" ]]
+  else
+    false
+  fi
+}
+
+# Refresh the tier's live TSV against the currently-configured plane set.
+# Dead planes (probe failed) are dropped so rotation never lands on them.
+# $1 = tier, $2 = live TSV, $3 = api, $4 = balancer, $5 = full meta TSV (all planes)
+warp_refresh_liveness(){
+  local tier="$1" live_tsv="$2" api="$3" balancer="$4" meta_tsv="$5"
+  local out="$AUX_DIR/${tier}-live-check.tsv"
+  : > "$out"
+  local row tag
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    tag=$(cut -f1 <<<"$row")
+    if warp_probe_plane "$tier" "$api" "$balancer" "$tag" "$live_tsv"; then
+      log "Warp[$tier] liveness: $tag OK"
+      echo "$row" >> "$out"
+    else
+      warn "Warp[$tier] liveness: $tag DEAD — dropped from rotation"
+    fi
+  done < "$meta_tsv"
+  if [[ -s "$out" ]]; then mv "$out" "$live_tsv"; else : > "$live_tsv"; fi
+}
+
 rotate_loop_1min(){
   update_rotate_target "$ROTATE1MIN_CONFIG" "$ROTATE1MIN_META" "$ROTATE1MIN_STATE" \
     "$AUX_LOG/rotate1min.log" "$ROTATE1MIN_PID" "1min"
@@ -1023,34 +1139,76 @@ rotate_loop_5min(){
   done
 }
 
-rotate_loop_warp_2min(){
-  update_rotate_target "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
-    "$AUX_LOG/rotatewarp2min.log" "$ROTATE_WARP2MIN_PID" "warp2min"
+# ─── WARP rotation (API override, warm sessions) ──────────────────────────────
+# Rotates a WARP tier by overriding its balancer via the xray gRPC API. The aux
+# xray is a single long-lived process holding ALL planes, so every WireGuard
+# session stays warm: flipping egress is an instant API call, NOT a restart with
+# a dead cold-handshake window (which is what made the tier appear broken).
+# $1 = meta (tag\thost lines of live planes), $2 = state, $3 = reason/log label
+update_warp_target(){
+  local meta="$1" state="$2" reason="$3"
+  [[ -f "$meta" ]] || return 0
+  local prev_host next api balancer nhost
+  # Read the currently-selected egress + api endpoint + balancer from state.
+  read -r prev_host api balancer <<< "$(python3 - "$state" 2>/dev/null <<'PY' || true
+import sys,json
+try:
+ s=json.load(open(sys.argv[1])); print(s.get('host','?') or '?', s.get('api','127.0.0.1:10050'), s.get('balancer','warpsel'))
+except Exception: print('? 127.0.0.1:10050 warpsel')
+PY
+)"
+  next=$(pick_next "$meta" "$state" 2>/dev/null || true)
+  [[ -n "$next" ]] || return 0
+  read -r _ncountry nhost <<< "$(awk -F'\t' -v t="$next" '$1==t{print $2"\t"$3; exit}' "$meta" 2>/dev/null)"
+  # Override the balancer to pin exactly this plane — warm, no restart.
+  if "$XRAY_BIN" api bo --server="$api" -b "$balancer" "$next" >/dev/null 2>&1; then
+    python3 - "$state" "$next" "$nhost" <<'PY'
+import sys,json
+p,tag,host=sys.argv[1:]
+try: s=json.load(open(p))
+except Exception: s={}
+s['tag']=tag; s['host']=host
+json.dump(s,open(p,'w'),indent=2)
+PY
+    log "Rotate[$reason]: host $prev_host → $next (WARP, ${nhost:-?}) via api override"
+  else
+    warn "Rotate[$reason]: bo override failed ($api $balancer $next)"
+  fi
+}
+
+# Generic WARP rotation loop. $1=tier, $2=live TSV, $3=state, $4=full meta,
+# $5=api port, $6=uuid, $7=ws path, $8=aux listen port, $9=interval.
+rotate_loop_warp(){
+  local tier="$1" live="$2" state="$3" meta="$4" api="$5" uuid="$6" path="$7" tport="$8" interval="$9"
+  # A persistent loopback probe client lets us verify each plane end-to-end.
+  start_warp_probe_client "$tier" "$tport" "$uuid" "$path"
+  update_warp_target "$live" "$state" "$tier"
+  local cycle=0
   while :; do
-    sleep "$ROTATEWARP2MIN_INTERVAL"
-    update_rotate_target "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
-      "$AUX_LOG/rotatewarp2min.log" "$ROTATE_WARP2MIN_PID" "warp2min"
+    sleep "$interval"
+    cycle=$((cycle+1))
+    # Refresh plane liveness periodically so dead planes are pruned (and gone
+    # planes recovered by the next pass). Direct-fallback tiers skip probing.
+    if [[ -n "$api" ]]; then
+      warp_refresh_liveness "$tier" "$live" "127.0.0.1:$api" "warpsel" "$meta" || true
+    fi
+    update_warp_target "$live" "$state" "$tier"
   done
+}
+
+rotate_loop_warp_2min(){
+  rotate_loop_warp "warp2min" "$WARP2MIN_LIVE" "$ROTATE_WARP2MIN_STATE" "$ROTATE_WARP2MIN_META" \
+    10050 "${UUID_ROTATE_WARP2MIN:-}" "${PATH_ROTATE_WARP2MIN:-}" 10040 "$ROTATEWARP2MIN_INTERVAL"
 }
 
 rotate_loop_warp_4min(){
-  update_rotate_target "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
-    "$AUX_LOG/rotatewarp4min.log" "$ROTATE_WARP4MIN_PID" "warp4min"
-  while :; do
-    sleep "$ROTATEWARP4MIN_INTERVAL"
-    update_rotate_target "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
-      "$AUX_LOG/rotatewarp4min.log" "$ROTATE_WARP4MIN_PID" "warp4min"
-  done
+  rotate_loop_warp "warp4min" "$WARP4MIN_LIVE" "$ROTATE_WARP4MIN_STATE" "$ROTATE_WARP4MIN_META" \
+    10052 "${UUID_ROTATE_WARP4MIN:-}" "${PATH_ROTATE_WARP4MIN:-}" 10042 "$ROTATEWARP4MIN_INTERVAL"
 }
 
 rotate_loop_warp_6min(){
-  update_rotate_target "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
-    "$AUX_LOG/rotatewarp6min.log" "$ROTATE_WARP6MIN_PID" "warp6min"
-  while :; do
-    sleep "$ROTATEWARP6MIN_INTERVAL"
-    update_rotate_target "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
-      "$AUX_LOG/rotatewarp6min.log" "$ROTATE_WARP6MIN_PID" "warp6min"
-  done
+  rotate_loop_warp "warp6min" "$WARP6MIN_LIVE" "$ROTATE_WARP6MIN_STATE" "$ROTATE_WARP6MIN_META" \
+    10054 "${UUID_ROTATE_WARP6MIN:-}" "${PATH_ROTATE_WARP6MIN:-}" 10044 "$ROTATEWARP6MIN_INTERVAL"
 }
 
 # ─── Write all six rotation configs ────────────────────────────────────────────
@@ -1075,15 +1233,17 @@ write_all_rotate_configs(){
   gen_rotate_config "$ROTATE5MIN_INTERVAL" 10034 "$ROTATE5MIN_CONFIG" "$ROTATE5MIN_META" "$ROTATE5MIN_STATE" \
     "${UUID_ROTATE5MIN:-}" "${PATH_ROTATE5MIN:-}" "$main_country" "${DOMAIN}"
   start_aux_xray "$ROTATE5MIN_CONFIG" "$AUX_LOG/rotate5min.log" "$ROTATE5MIN_PID"
-  # WARP tiers — rotate across the registered WARP planes on their cadence.
+  # WARP tiers — one warm xray per tier holding ALL planes, rotated via the
+  # xray API (balancer override) so sessions stay warm (no restart = no dead
+  # handshake window). API ports 10050/10052/10054, liveness files in aux.
   gen_warp_rotate_config "$ROTATE_WARP2MIN_CONFIG" "$ROTATE_WARP2MIN_META" "$ROTATE_WARP2MIN_STATE" \
-    "${UUID_ROTATE_WARP2MIN:-}" "${PATH_ROTATE_WARP2MIN:-}" 10040
+    "${UUID_ROTATE_WARP2MIN:-}" "${PATH_ROTATE_WARP2MIN:-}" 10040 10050 "$WARP2MIN_LIVE"
   start_aux_xray "$ROTATE_WARP2MIN_CONFIG" "$AUX_LOG/rotatewarp2min.log" "$ROTATE_WARP2MIN_PID"
   gen_warp_rotate_config "$ROTATE_WARP4MIN_CONFIG" "$ROTATE_WARP4MIN_META" "$ROTATE_WARP4MIN_STATE" \
-    "${UUID_ROTATE_WARP4MIN:-}" "${PATH_ROTATE_WARP4MIN:-}" 10042
+    "${UUID_ROTATE_WARP4MIN:-}" "${PATH_ROTATE_WARP4MIN:-}" 10042 10052 "$WARP4MIN_LIVE"
   start_aux_xray "$ROTATE_WARP4MIN_CONFIG" "$AUX_LOG/rotatewarp4min.log" "$ROTATE_WARP4MIN_PID"
   gen_warp_rotate_config "$ROTATE_WARP6MIN_CONFIG" "$ROTATE_WARP6MIN_META" "$ROTATE_WARP6MIN_STATE" \
-    "${UUID_ROTATE_WARP6MIN:-}" "${PATH_ROTATE_WARP6MIN:-}" 10044
+    "${UUID_ROTATE_WARP6MIN:-}" "${PATH_ROTATE_WARP6MIN:-}" 10044 10054 "$WARP6MIN_LIVE"
   start_aux_xray "$ROTATE_WARP6MIN_CONFIG" "$AUX_LOG/rotatewarp6min.log" "$ROTATE_WARP6MIN_PID"
 }
 
