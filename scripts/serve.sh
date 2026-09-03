@@ -199,7 +199,7 @@ WARP_PLANES_ACTIVE=false
 start_warp_planes(){
   local planedir="${LOG_DIR}/warp-planes"
   mkdir -p "$planedir"
-  local warpb warpbinst
+  local warpbinst
   warpbinst=$(command -v warp-go 2>/dev/null || true)
   if [[ -z "$warpbinst" ]]; then
     log "Downloading warp-go (free multi-IP WARP)..."
@@ -218,7 +218,8 @@ start_warp_planes(){
     warpbinst="$PWD/warp-go"
   fi
 
-  local -a ports=($WARP_PLANE_PORTS)
+  local -a ports=()
+  read -r -a ports <<< "$WARP_PLANE_PORTS"
   [[ ${#ports[@]} -ge 3 ]] || { warn "WARP_PLANE_PORTS must list 3 ports"; return 1; }
   local p cfg
   for p in "${ports[@]}"; do
