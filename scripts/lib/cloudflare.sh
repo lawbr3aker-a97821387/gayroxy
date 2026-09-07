@@ -76,6 +76,7 @@ d=json.load(sys.stdin)
 r=d.get("result") if d.get("success") else None
 print(r if isinstance(r,str) else (r.get("token","") if isinstance(r,dict) else ""))') || true
     [[ -n "$TUNNEL_TOKEN" ]] || { warn "CF API: token fetch failed (token lacks Cloudflare Tunnel:Edit?)"; return 1; }
+    TUNNEL_ID="$tunnel_id"   # exported for the yield-to-successor monitor (serve.sh)
 
     # 3. DNS route: CNAME TUNNEL_DOMAIN → <tunnel-id>.cfargotunnel.com (proxied)
     #    (Zone:Read + DNS:Edit). Idempotent: reuse existing record if present.
@@ -97,4 +98,22 @@ print(r if isinstance(r,str) else (r.get("token","") if isinstance(r,dict) else 
     fi
 
     return 0
+}
+
+# ─── Active connector count on the named tunnel ────────────────────────────
+# GET /cfd_tunnel/<id> → result.conns[] ; each connector registers 4 conns
+# (one per authoritative region). Count DISTINCT client_id values → number of
+# cloudflared processes currently running this tunnel. Used by the yield-to-
+# successor monitor: when a second connector appears in the final minutes of
+# this run's life, we exit early so CF drains traffic to the new connector.
+named_tunnel_connector_count() {
+    local api="https://api.cloudflare.com/client/v4"
+    local auth="Authorization: Bearer ***"
+    curl -sf --max-time 12 -H "$auth" \
+        "$api/accounts/${TUNNEL_ACCT_ID}/cfd_tunnel/${TUNNEL_ID}" \
+        | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("result") or {}
+conns=r.get("conns") or []
+print(len({c.get("client_id") for c in conns if c.get("client_id")}))' 2>/dev/null || echo 0
 }

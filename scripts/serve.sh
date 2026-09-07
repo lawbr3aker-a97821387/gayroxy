@@ -43,6 +43,7 @@ cleanup() {
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
+    [[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
     wait 2>/dev/null || true
     log "All services stopped."
 }
@@ -419,39 +420,6 @@ curl -sI "http://127.0.0.1:${PORT_NGINX}/" > /dev/null 2>&1 && log "nginx respon
     exit 1
 }
 
-# ─── Tunnel handover lock (high #1) ────────────────────────────────────────
-# If a previous run's tunnel is still alive (this run was dispatched early for
-# a zero-downtime handover), wait for it to drop before registering ours.
-# Two tunnels on the same hostname would flap — never start while one lives.
-# If the old tunnel survives the wait, DEFER: exit cleanly and let the current
-# run's own end-of-cycle retrigger spawn the next one.
-# NOTE: named-tunnel mode only. Quick tunnels get a fresh random URL every
-# run — there is nothing to hand over; the old URL simply dies with its run.
-# Liveness probe: tunnel is ALIVE only on a real 2xx/3xx from the tunnel's own
-# nginx. Cloudflare error pages (530 no-tunnel, 521/522 origin down) must count
-# as DOWN — plain `curl -s` exits 0 on ANY HTTP response, which fooled the lock
-# into thinking a dead tunnel was alive (chain died silently). We probe /sub
-# which nginx always serves while the proxy runs.
-tunnel_alive() {
-    curl -sf -o /dev/null --max-time 8 "https://${TUNNEL_DOMAIN}/sub" 2>/dev/null
-}
-if [[ "$AUTO_RETRIGGER" == "1" && -n "$TUNNEL_DOMAIN" ]]; then
-    lock_attempts=0
-    lock_max=$(( (RETRIGGER_LEAD_MIN + 3) * 60 / 10 ))   # ~11 min at 10s ticks
-    while (( lock_attempts < lock_max )); do
-        if ! tunnel_alive; then
-            log "Old tunnel down — taking over (after $((lock_attempts * 10))s)."
-            break
-        fi
-        lock_attempts=$((lock_attempts + 1))
-        sleep 10
-    done
-    if (( lock_attempts >= lock_max )); then
-        log "Old tunnel still up after $((lock_max * 10))s — deferring to current run's cycle."
-        exit 0
-    fi
-fi
-
 # ─── Start Cloudflare Tunnel ────────────────────────────────────────────────
 CLOUDFLARED_LOG="${LOG_DIR}/cloudflared.log"
 if [[ -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" ]]; then
@@ -541,6 +509,35 @@ if [[ "$LIVE_DEPLOY" == "1" && "$RENDER_ONLY" != "1" ]]; then
     fi
 fi
 
+# ─── Yield-to-successor (seamless handover) ─────────────────────────────────
+# Cloudflare-native HA: this run connected cloudflared to the named tunnel and
+# its SUCCESSOR will do the same while we're still alive (dispatched
+# RETRIGGER_LEAD_MIN min early). Two connectors on one tunnel → CF load-
+# balances between them; when we exit, existing+new traffic drains to the
+# successor within seconds. No lock, no wait: we just stop early once the
+# successor is actually registered, so clients never see a dead endpoint.
+# We only check during the yield window (RUN_TIMEOUT_MIN − 2×LEAD .. end),
+# to keep the API quiet for the rest of the run.
+if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "${TUNNEL_ID:-}" ]]; then
+    NAMED_TUNNEL=1
+    YIELD_START_SEC=$(( (RUN_TIMEOUT_MIN - 2 * RETRIGGER_LEAD_MIN) * 60 ))
+    (
+        sleep "$YIELD_START_SEC"
+        log "Yield window open — watching for a second tunnel connector..."
+        while :; do
+            n=$(named_tunnel_connector_count)
+            if [[ "${n:-0}" -ge 2 ]]; then
+                log "Successor connector registered (${n} active) — yielding tunnel. CF drains clients to the successor in seconds."
+                exit 0   # EXIT trap → cleanup kills our cloudflared; successor stays up
+            fi
+            sleep 15
+        done
+    ) &
+    YIELD_PID=$!
+else
+    NAMED_TUNNEL=""; YIELD_PID=""
+fi
+
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     # Register free Cloudflare WARP identities BEFORE the health agent generates
     # the aux xray configs, so its wireguard outbounds use real planes when
@@ -616,5 +613,6 @@ wait "$XRAY_PID"
 wait "$WATCHDOG_PID" 2>/dev/null || true
 wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
 [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+[[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
 [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
 exit 0

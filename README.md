@@ -274,17 +274,16 @@ that guarantees the chain never silently dies:
   the queue is wedged (no runner will pick it up) → it is cancelled.
 - If **no** run is active at all (chain dead) → a fresh run is dispatched.
 
-**Dead-gap tradeoff:** GitHub-hosted runners are ephemeral — between runs there
-is a short window (runner teardown + successor boot, roughly 10–60 s) with no
-tunnel, during which the Cloudflare edge serves 502/522 for tunneled paths
-(`/sub` and `/panel` keep working via the Worker + KV, which are always on).
-Three mitigations keep the gap small:
-- `RETRIGGER_LEAD_MIN` — the outgoing run dispatches its successor before the
-  240-min cap, so the next runner boots while the old tunnel is still up.
-- The **named tunnel** (auto-derived `gaaayroxy.<zone>`) keeps a stable hostname;
-  the route stays pinned at the edge and only the origin blips during the gap.
-- Failed boots fail fast (boot-verify) so a broken run is replaced quickly
-  instead of serving errors until its timeout.
+**Seamless handover (Cloudflare-native HA):** each serve run boots its own
+cloudflared connector to the SAME named tunnel (no lock, no waiting). At
+minute 275 of its 285-min life it dispatches a successor run; the successor's
+runner boots in ~1-2 min and registers a **second connector** on the same
+tunnel. Cloudflare then load-balances connections across both connectors.
+The outgoing run's yield monitor polls the tunnel API during its final
+window; the moment the connector count reaches 2, it exits cleanly — CF
+drains existing+new connections to the successor within seconds. Clients
+never see a dead endpoint: worst case a live connection re-asks on the next
+config fetch and lands on the new runner.
 
 **Runtime watchdog:** while serving, the proxy job health-checks the public
 endpoint every 20 s; after 3 consecutive failures (~60 s) the run exits so the

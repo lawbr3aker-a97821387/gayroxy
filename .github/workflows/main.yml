@@ -6,7 +6,7 @@ concurrency:
   # wedges the group, bump to the next version so the newest dispatch starts
   # immediately. serve.sh's handover lock handles the momentary overlap.
   # History: v1 → 33422909163, v2 → 33564083894, v3 → 33574439636, v4 → 33575514430, v5 → 33576017366.
-  group: gayroxy-deploy-v6
+  group: gayroxy-deploy-v7
   cancel-in-progress: true
 
 on:
@@ -235,7 +235,7 @@ jobs:
     # own tunnel and its LIVE_DEPLOY still publishes a working sub.
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 285
 
     steps:
       - uses: actions/checkout@v4
@@ -284,6 +284,8 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "1"
+          RUN_TIMEOUT_MIN: "285"
+          RETRIGGER_LEAD_MIN: "10"
           LIVE_DEPLOY: "1"
           HEALTH_AGENT: "1"
           HEALTH_INTERVAL: "600"
