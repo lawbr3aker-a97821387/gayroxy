@@ -82,10 +82,25 @@ if [[ "$RENDER_ONLY" != "1" && ! -x "$XRAY_BIN" ]]; then
         armv7l)  XRAY_ZIP="Xray-linux-arm32-v7a.zip" ;;
         *)       error "Unsupported arch: $ARCH"; exit 1 ;;
     esac
-    URL=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
-        | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' | grep "$XRAY_ZIP" | head -1)
+    URL=$(curl -sfL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+        | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' | grep "$XRAY_ZIP" | head -1 || true)
+    # Fallback: API rate-limited or unreachable — resolve via the releases page redirect.
+    if [[ -z "$URL" ]]; then
+        warn "xray release API lookup failed — falling back to release/expanded_assets"
+        TAG=$(curl -sIL -o /dev/null -w '%{url_effective}' https://github.com/XTLS/Xray-core/releases/latest) || TAG=""
+        TAG="${TAG##*/}"
+        [[ -n "$TAG" && "$TAG" != "latest" ]] && URL="https://github.com/XTLS/Xray-core/releases/download/${TAG}/${XRAY_ZIP}"
+    fi
     [[ -z "$URL" ]] && error "Could not find xray-core download." && exit 1
-    curl -L --progress-bar -o xray.zip "$URL"
+    # Retry the binary download up to 3 times (transient 5xx / connection resets)
+    for attempt in 1 2 3; do
+        if curl -fL --connect-timeout 20 --retry 2 -o xray.zip "$URL"; then
+            break
+        fi
+        warn "xray download attempt $attempt failed — retrying..."
+        sleep 5
+    done
+    [[ -s xray.zip ]] || { error "xray binary download failed after retries."; exit 1; }
     unzip -o xray.zip xray >/dev/null 2>&1 || true
     chmod +x xray && rm -f xray.zip
     log "xray-core downloaded."
@@ -519,7 +534,6 @@ fi
 # We only check during the yield window (RUN_TIMEOUT_MIN − 2×LEAD .. end),
 # to keep the API quiet for the rest of the run.
 if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "${TUNNEL_ID:-}" ]]; then
-    NAMED_TUNNEL=1
     YIELD_START_SEC=$(( (RUN_TIMEOUT_MIN - 2 * RETRIGGER_LEAD_MIN) * 60 ))
     (
         sleep "$YIELD_START_SEC"
@@ -535,7 +549,7 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "$
     ) &
     YIELD_PID=$!
 else
-    NAMED_TUNNEL=""; YIELD_PID=""
+    YIELD_PID=""
 fi
 
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
