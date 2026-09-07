@@ -235,7 +235,7 @@ jobs:
     # own tunnel and its LIVE_DEPLOY still publishes a working sub.
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 285
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -284,8 +284,8 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "1"
-          RUN_TIMEOUT_MIN: "285"
-          RETRIGGER_LEAD_MIN: "10"
+          RUN_TIMEOUT_MIN: "6"
+          RETRIGGER_LEAD_MIN: "1"
           LIVE_DEPLOY: "1"
           HEALTH_AGENT: "1"
           HEALTH_INTERVAL: "600"
