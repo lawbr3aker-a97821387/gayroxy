@@ -38,7 +38,15 @@ NGINX_CONF="${XRAY_DIR}/nginx.conf"
 
 # ─── PID tracking + cleanup (registered early so any failure cleans up) ─────
 XRAY_PID=""; CLOUDFLARED_PID=""
+CLEANUP_DONE=0
 cleanup() {
+    # Idempotent: the EXIT trap re-fires when main exits after the TERM
+    # handler already cleaned up. Second entry must not block on `wait`
+    # (uninterruptible background children like the watchdog).
+    if (( CLEANUP_DONE )); then
+        return 0
+    fi
+    CLEANUP_DONE=1
     log "Stopping services..."
     touch "$SHUTTING_DOWN_FLAG" 2>/dev/null || true
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
