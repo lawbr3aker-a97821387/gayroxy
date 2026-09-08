@@ -44,6 +44,8 @@ cleanup() {
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
     [[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
+    [[ -n "${YIELD_SIGNAL_PID:-}" ]] && kill "$YIELD_SIGNAL_PID" 2>/dev/null || true
+    [[ -n "${YIELD_SENTINEL:-}" ]] && rm -f "$YIELD_SENTINEL" 2>/dev/null || true
     wait 2>/dev/null || true
     log "All services stopped."
 }
@@ -533,6 +535,12 @@ fi
 # successor is actually registered, so clients never see a dead endpoint.
 # We only check during the yield window (RUN_TIMEOUT_MIN − 2×LEAD .. end),
 # to keep the API quiet for the rest of the run.
+#
+# BUG-FIX: the yield subshell's `exit 0` only exits the subshell, not main.
+# Instead we write a sentinel file; yield_signal_watcher (below) polls it and
+# signals main to exit.
+YIELD_SENTINEL="${LOG_DIR}/yield-surrender"
+rm -f "$YIELD_SENTINEL"
 if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "${TUNNEL_ID:-}" ]]; then
     YIELD_START_SEC=$(( (RUN_TIMEOUT_MIN - 2 * RETRIGGER_LEAD_MIN) * 60 ))
     (
@@ -541,15 +549,30 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "$
         while :; do
             n=$(named_tunnel_connector_count)
             if [[ "${n:-0}" -ge 2 ]]; then
-                log "Successor connector registered (${n} active) — yielding tunnel. CF drains clients to the successor in seconds."
-                exit 0   # EXIT trap → cleanup kills our cloudflared; successor stays up
+                log "Successor connector registered (${n} active) — yielding tunnel. CF drains clients to successor in seconds."
+                touch "$YIELD_SENTINEL"
+                exit 0
             fi
             sleep 15
         done
     ) &
     YIELD_PID=$!
+    # Poll the sentinel every 10s; when set, signal main to exit so the
+    # tunnel is released to the successor (the subshell can't signal main).
+    (
+        while :; do
+            sleep 10
+            if [[ -f "$YIELD_SENTINEL" ]]; then
+                log "yield: successor confirmed — signaling main to exit for seamless handover."
+                kill -TERM "$$" 2>/dev/null || true
+                exit 0
+            fi
+        done
+    ) &
+    YIELD_SIGNAL_PID=$!
 else
     YIELD_PID=""
+    YIELD_SIGNAL_PID=""
 fi
 
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
@@ -629,4 +652,5 @@ wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
 [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
 [[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
 [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
+[[ -n "${YIELD_SIGNAL_PID:-}" ]] && kill "$YIELD_SIGNAL_PID" 2>/dev/null || true
 exit 0
