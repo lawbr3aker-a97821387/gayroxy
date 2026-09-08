@@ -43,8 +43,7 @@ cleanup() {
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
-    [[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
-    [[ -n "${YIELD_SIGNAL_PID:-}" ]] && kill "$YIELD_SIGNAL_PID" 2>/dev/null || true
+    [[ -n "${RETRIGGER_PID:-}" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
     [[ -n "${YIELD_SENTINEL:-}" ]] && rm -f "$YIELD_SENTINEL" 2>/dev/null || true
     [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
     wait 2>/dev/null || true
@@ -534,63 +533,14 @@ fi
 # balances between them; when we exit, existing+new traffic drains to the
 # successor within seconds. No lock, no wait: we just stop early once the
 # successor is actually registered, so clients never see a dead endpoint.
-# We only check during the yield window (RUN_TIMEOUT_MIN − 2×LEAD .. end),
-# to keep the API quiet for the rest of the run.
 #
-# BUG-FIX: the yield subshell's `exit 0` only exits the subshell, not main.
-# Instead we write a sentinel file; yield_signal_watcher (below) polls it and
-# signals main to exit.
+# IMPLEMENTATION: the retrigger subshell writes RETRIGGER_FIRED_FLAG after
+# dispatching (or finding an existing successor). The main loop polls this
+# flag every 5s and exits cleanly when it appears — no separate yield
+# subshell or signal watcher needed.
 YIELD_SENTINEL="${LOG_DIR}/yield-surrender"
 RETRIGGER_FIRED_FLAG="${LOG_DIR}/retrigger-fired"
 rm -f "$YIELD_SENTINEL" "$RETRIGGER_FIRED_FLAG"
-if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "${TUNNEL_ID:-}" ]]; then
-    YIELD_START_SEC=$(( (RUN_TIMEOUT_MIN - 2 * RETRIGGER_LEAD_MIN) * 60 ))
-    (
-        sleep "$YIELD_START_SEC"
-        log "Yield window open — watching for a second tunnel connector or successor run..."
-        grace=0
-        while :; do
-            # Fast path: 2 connectors = successor is fully up → seamless handover
-            n=$(named_tunnel_connector_count)
-            if [[ "${n:-0}" -ge 2 ]]; then
-                log "Successor connector registered (${n} active) — yielding tunnel. CF drains clients to successor in seconds."
-                touch "$YIELD_SENTINEL"
-                exit 0
-            fi
-            # Fallback: successor run was dispatched (retrigger fired) but hasn't
-            # booted cloudflared yet (concurrency group blocks it). After 60s
-            # grace, exit so the successor can start — accept a brief gap rather
-            # than a 15-min stall.
-            if (( grace >= 60 )); then
-                if [[ -f "${RETRIGGER_FIRED_FLAG:-}" ]]; then
-                    log "Yield: retrigger fired (flag exists) but successor not yet serving (connector count=${n:-0}). After 60s grace — yielding to let it start."
-                    touch "$YIELD_SENTINEL"
-                    exit 0
-                fi
-            fi
-            grace=$((grace + 15))
-            log "Yield check: grace=${grace}s connector=${n:-0} flag=$([ -f "${RETRIGGER_FIRED_FLAG:-/dev/null}" ] && echo YES || echo NO)"
-            sleep 15
-        done
-    ) &
-    YIELD_PID=$!
-    # Poll the sentinel every 10s; when set, signal main to exit so the
-    # tunnel is released to the successor (the subshell can't signal main).
-    (
-        while :; do
-            sleep 10
-            if [[ -f "$YIELD_SENTINEL" ]]; then
-                log "yield: successor confirmed — signaling main to exit for seamless handover."
-                kill -TERM "$$" 2>/dev/null || true
-                exit 0
-            fi
-        done
-    ) &
-    YIELD_SIGNAL_PID=$!
-else
-    YIELD_PID=""
-    YIELD_SIGNAL_PID=""
-fi
 
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     # Register free Cloudflare WARP identities BEFORE the health agent generates
@@ -666,12 +616,20 @@ watchdog &
 WATCHDOG_PID=$!
 
 log "Running... (Ctrl-C to stop)"
-wait "$XRAY_PID"
+# Poll loop: wait for xray to die OR for the retrigger flag to appear.
+# When the flag appears, a successor run exists — exit cleanly so the
+# concurrency group frees and the successor can boot its own tunnel.
+while kill -0 "$XRAY_PID" 2>/dev/null; do
+    if [[ -f "${RETRIGGER_FIRED_FLAG:-}" ]]; then
+        log "yield: retrigger fired — successor exists. Exiting for seamless handover."
+        exit 0   # EXIT trap → cleanup kills our cloudflared; successor takes over
+    fi
+    sleep 5
+done
+# Xray died on its own — fall through to cleanup.
 # Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
 wait "$WATCHDOG_PID" 2>/dev/null || true
 wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
 [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
-[[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
 [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
-[[ -n "${YIELD_SIGNAL_PID:-}" ]] && kill "$YIELD_SIGNAL_PID" 2>/dev/null || true
 exit 0
