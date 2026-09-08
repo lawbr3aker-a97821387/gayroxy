@@ -210,12 +210,33 @@ jobs:
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SEED: "${{ secrets.CF_TOKEN || github.repository }}"
+          FLAG_DEPLOYED_FILE: "/tmp/flag-deployed"
         run: |
           mkdir -p logs
           set -o pipefail
           if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/ 2>/dev/null || true; fi
           echo "::group::Serve Output"
-          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
+          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
+          SERVE_PID=$!
+
+          echo "Wait till the lock apear"
+          while [ ! -f "$FLAG_DEPLOYED_FILE" ]; do
+              sleep 10
+          done
+
+          echo "Tunnel deployed"
+          # Now perform cleanup: kill any leftover workflows
+          gh run list -L 100 \
+            --workflow main.yaml \
+            --workflow handover.yaml \
+            --json status,databaseId \
+            -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
+            | grep -v "${{ github.run_id }}" \
+            | xargs -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+          echo "Cleanup completed."
+
+          wait $SERVE_PID
+
           echo "::group::"
       - name: 📤 Upload artifacts
         if: always()
@@ -238,7 +259,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       RUN_TIMEOUT_MIN: 280
     steps:
-      - name: Dispatch Main
+      - name: Dispatch Handover
         run: |
           echo "Will dispatch 'main.yml' workflow in ${{ env.RUN_TIMEOUT_MIN }} minutes..."
           sleep "${{ env.RUN_TIMEOUT_MIN }}m"
