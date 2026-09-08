@@ -229,13 +229,16 @@ jobs:
           echo "Tunnel deployed"
 
           set +e
-          gh run list -L 100 \
-            --workflow "Build & Deploy Proxy" \
-            --workflow "Deploy Proxy" \
-            --json status,databaseId \
-            -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
+          {
+            gh run list -L 100 --workflow "Build & Deploy Proxy" \
+              --json status,databaseId \
+              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+            gh run list -L 100 --workflow "Proxy Handover" \
+              --json status,databaseId \
+              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+          } | sort -u \
             | grep -v "${{ github.run_id }}" \
-            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel || true
+            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
           set -e
           echo "Cleanup completed."
 
