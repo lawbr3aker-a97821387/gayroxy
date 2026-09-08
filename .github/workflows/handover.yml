@@ -1,15 +1,12 @@
-name: Proxy Handover
+name: "Deploy Proxy #Handover"
 
 concurrency:
-  group: handover-deploy-v7
-  cancel-in-progress: false
+  group: gayroxy-deploy-handover-${{ github.sha }}
+  cancel-in-progress: true
 
-on:
-  workflow_dispatch:
-    inputs:
-      parent_run_id:
-        required: false
-        default: ""
+# on:
+#   push:
+#     branches: [master]
 
 permissions:
   actions: write
@@ -64,7 +61,6 @@ jobs:
             sub/subscription.b64
           if-no-files-found: ignore
           retention-days: 3
-
   deploy-assets:
     needs: render
     if: always()
@@ -103,7 +99,7 @@ jobs:
             export SUB_DIR="$PWD/sub"
             ./scripts/publish/deploy-cf.sh 2>&1
           fi
-          echo "::endgroup::"
+          echo "::group::"
 
   boot-verify:
     needs: deploy-assets
@@ -153,13 +149,12 @@ jobs:
           export SUB_DIR="$PWD/sub"
           echo "::group::Publish Live"
           ./scripts/publish/publish-live.sh 2>&1
-          echo "::endgroup::"
-
+          echo "::group::"
   serve:
     needs: [render, deploy-assets, boot-verify, publish-live]
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 285
     steps:
       - uses: actions/checkout@v4
         with:
@@ -192,14 +187,15 @@ jobs:
           path: xray
           key: xray-${{ runner.os }}-${{ steps.xrayver.outputs.tag }}
           restore-keys: xray-${{ runner.os }}-
-      - name: ▶️ Run serve (long-lived tunnel)
+      - name: ▶️ Run serve (long-lived tunnel + health agent)
+        id: serve
         env:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "0"
-          RUN_TIMEOUT_MIN: "6"
-          RETRIGGER_LEAD_MIN: "1"
-          LIVE_DEPLOY: "0"
+          # RUN_TIMEOUT_MIN: "6"
+          # RETRIGGER_LEAD_MIN: "1"
+          LIVE_DEPLOY: "1"
           HEALTH_AGENT: "1"
           HEALTH_INTERVAL: "600"
           ROTATE1MIN_INTERVAL: "60"
@@ -220,12 +216,12 @@ jobs:
           if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/ 2>/dev/null || true; fi
           echo "::group::Serve Output"
           setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
-          echo "::endgroup::"
+          echo "::group::"
       - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: handover-logs
+          name: proxy-logs
           path: |
             logs/
             sub/*.html
@@ -233,17 +229,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  handover-trigger:
+  retrigger:
     needs: [render, deploy-assets, boot-verify, publish-live]
+    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 285
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      SLEEP_SEC: "300"
+      RUN_TIMEOUT_MIN: 280
     steps:
-      - name: Dispatch main.yml at handover time (5 min)
+      - name: Dispatch Main
         run: |
-          echo "Will dispatch 'Build & Deploy Proxy' workflow in 300 seconds (5 min)..."
-          sleep 300
-          gh workflow run "Build & Deploy Proxy" -f parent_run_id="$GITHUB_RUN_ID" --ref master
+          echo "Will dispatch 'main.yml' workflow in ${{ env.RUN_TIMEOUT_MIN }} minutes..."
+          sleep "${{ env.RUN_TIMEOUT_MIN }}m"
+          gh workflow run main.yml --ref master
           echo "Dispatched."

@@ -1,19 +1,14 @@
-name: Build & Deploy Proxy
+name: "Build & Deploy Proxy"
 
 concurrency:
-  group: gayroxy-deploy-v7
-  cancel-in-progress: true
+  group: gayroxy-deploy-${{ github.sha }}
+  # cancel-in-progress: true
 
 on:
   push:
     branches: [master]
   schedule:
-    - cron: "17 3 * * *"
-  workflow_dispatch:
-    inputs:
-      parent_run_id:
-        required: false
-        default: ""
+    - cron: "20 */5 * * *"
 
 permissions:
   actions: write
@@ -68,7 +63,6 @@ jobs:
             sub/subscription.b64
           if-no-files-found: ignore
           retention-days: 3
-
   deploy-assets:
     needs: render
     if: always()
@@ -158,12 +152,11 @@ jobs:
           echo "::group::Publish Live"
           ./scripts/publish/publish-live.sh 2>&1
           echo "::group::"
-
   serve:
     needs: [render, deploy-assets, boot-verify, publish-live]
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 285
     steps:
       - uses: actions/checkout@v4
         with:
@@ -202,8 +195,8 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "0"
-          RUN_TIMEOUT_MIN: "6"
-          RETRIGGER_LEAD_MIN: "1"
+          # RUN_TIMEOUT_MIN: "6"
+          # RETRIGGER_LEAD_MIN: "1"
           LIVE_DEPLOY: "1"
           HEALTH_AGENT: "1"
           HEALTH_INTERVAL: "600"
@@ -219,12 +212,33 @@ jobs:
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SEED: "${{ secrets.CF_TOKEN || github.repository }}"
+          FLAG_DEPLOYED_FILE: "/tmp/flag-deployed"
         run: |
           mkdir -p logs
           set -o pipefail
           if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/ 2>/dev/null || true; fi
           echo "::group::Serve Output"
-          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
+          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
+          SERVE_PID=$!
+
+          echo "Wait till the lock apear"
+          while [ ! -f "$FLAG_DEPLOYED_FILE" ]; do
+              sleep 10
+          done
+
+          echo "Tunnel deployed"
+          # Now perform cleanup: kill any leftover workflows
+          gh run list -L 100 \
+            --workflow main.yaml \
+            --workflow handover.yaml \
+            --json status,databaseId \
+            -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
+            | grep -v "${{ github.run_id }}" \
+            | xargs -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+          echo "Cleanup completed."
+
+          wait $SERVE_PID
+
           echo "::group::"
       - name: 📤 Upload artifacts
         if: always()
@@ -238,17 +252,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  handover-trigger:
+  retrigger:
     needs: [render, deploy-assets, boot-verify, publish-live]
+    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 285
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      SLEEP_SEC: "300"
+      RUN_TIMEOUT_MIN: 280
     steps:
-      - name: Dispatch handover workflow at 5 min mark
+      - name: Dispatch Handover
         run: |
-          echo "Will dispatch 'Proxy Handover' workflow in 300 seconds (5 min)..."
-          sleep 300
-          gh workflow run "Proxy Handover" -f parent_run_id="$GITHUB_RUN_ID" --ref master
+          echo "Will dispatch 'handover.yml' workflow in ${{ env.RUN_TIMEOUT_MIN }} minutes..."
+          sleep "${{ env.RUN_TIMEOUT_MIN }}m"
+          gh workflow run "Proxy Handover" --ref master
           echo "Dispatched."
