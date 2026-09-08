@@ -231,8 +231,8 @@ jobs:
           echo "Tunnel deployed"
 
           gh run list -L 100 \
-            --workflow main.yaml \
-            --workflow handover.yaml \
+            --workflow .github/workflows/main.yml \
+            --workflow .github/workflows/handover.yml \
             --json status,databaseId \
             -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
             | grep -v "${{ github.run_id }}" \
