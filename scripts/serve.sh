@@ -641,7 +641,7 @@ WATCHDOG_PID=$!
 
 FLAG_DEPLOYED_FILE="/tmp/flag-deployed"
 
-> "$FLAG_DEPLOYED_FILE"
+true > "$FLAG_DEPLOYED_FILE"
 log "Deployed flag"
 
 log "Running... (Ctrl-C to stop)"
