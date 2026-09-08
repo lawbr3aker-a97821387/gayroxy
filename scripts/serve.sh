@@ -624,8 +624,11 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
         else
             log "Auto-re-trigger: dispatching next run (${RUN_TIMEOUT_MIN}-${RETRIGGER_LEAD_MIN}min elapsed)..."
             gh workflow run "$WF_NAME" --ref "$REF" 2>&1 || true
-            touch "$RETRIGGER_FIRED_FLAG"
         fi
+        # Write flag in BOTH cases: a successor exists (pending/in_progress)
+        # OR was just dispatched. The yield monitor uses this to know it's
+        # safe to exit — regardless of whether we dispatched it or found it.
+        touch "$RETRIGGER_FIRED_FLAG"
     ) &
     RETRIGGER_PID=$!
     log "Auto-re-trigger armed: dispatch in ${sleep_sec}s (pid ${RETRIGGER_PID})"
