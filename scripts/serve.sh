@@ -14,7 +14,7 @@ source "${SCRIPT_DIR}/scripts/lib/cloudflare.sh"
 
 export RENDER_ONLY=0
 export HEALTH_AGENT=1
-export AUTO_RETRIGGER="${AUTO_RETRIGGER:-1}"
+# export AUTO_RETRIGGER="${AUTO_RETRIGGER:-1}"
 # RUN_TIMEOUT_MIN="${RUN_TIMEOUT_MIN:-240}"
 # RETRIGGER_LEAD_MIN="${RETRIGGER_LEAD_MIN:-15}"
 WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-120}"
@@ -52,18 +52,18 @@ cleanup() {
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
-    [[ -n "${RETRIGGER_PID:-}" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+    # [[ -n "${RETRIGGER_PID:-}" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
     [[ -n "${WATCHDOG_PID:-}" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
     [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
-    [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
+    # [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
     # Give tracked children a moment to die, then KILL the survivors.
     # NEVER `wait` — the watchdog/health-agent loops never exit, so an
     # unbounded wait would wedge the trap handler (and thus the run).
     sleep 2
     [[ -n "$CLOUDFLARED_PID" ]] && kill -9 "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill -9 "$XRAY_PID" 2>/dev/null || true
-    [[ -n "${RETRIGGER_PID:-}" ]] && kill -9 "$RETRIGGER_PID" 2>/dev/null || true
+    # [[ -n "${RETRIGGER_PID:-}" ]] && kill -9 "$RETRIGGER_PID" 2>/dev/null || true
     [[ -n "${WATCHDOG_PID:-}" ]] && kill -9 "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill -9 "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
     [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill -9 "$HEALTH_AGENT_PID" 2>/dev/null || true
@@ -561,8 +561,8 @@ fi
 # timeout. When the retrigger fires, it signals this run to exit so the
 # concurrency group frees and the successor can start. CF then drains traffic
 # to the successor's connector in seconds.
-RETRIGGER_FIRED_FLAG="${LOG_DIR}/retrigger-fired"
-rm -f "$RETRIGGER_FIRED_FLAG"
+# RETRIGGER_FIRED_FLAG="${LOG_DIR}/retrigger-fired"
+# rm -f "$RETRIGGER_FIRED_FLAG"
 
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     # Register free Cloudflare WARP identities BEFORE the health agent generates
@@ -654,6 +654,6 @@ fi
 # Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
 wait "$WATCHDOG_PID" 2>/dev/null || true
 wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
-[[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+# [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
 [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
 exit 0

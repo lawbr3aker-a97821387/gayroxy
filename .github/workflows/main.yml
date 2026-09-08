@@ -162,7 +162,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/*/*.sh .github/retrigger.sh
+        run: chmod +x scripts/*.sh scripts/*/*.sh
       - name: Compute cache week
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
