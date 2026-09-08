@@ -57,10 +57,16 @@ cleanup() {
     [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
     [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
     [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
-    # Kill any remaining stragglers in our process group (defensive — keeps
-    # the tee pipe closed so the step actually ends).
-    kill -- -"$$" 2>/dev/null || true
-    wait 2>/dev/null || true
+    # Give tracked children a moment to die, then KILL the survivors.
+    # NEVER `wait` — the watchdog/health-agent loops never exit, so an
+    # unbounded wait would wedge the trap handler (and thus the run).
+    sleep 2
+    [[ -n "$CLOUDFLARED_PID" ]] && kill -9 "$CLOUDFLARED_PID" 2>/dev/null || true
+    [[ -n "$XRAY_PID" ]] && kill -9 "$XRAY_PID" 2>/dev/null || true
+    [[ -n "${RETRIGGER_PID:-}" ]] && kill -9 "$RETRIGGER_PID" 2>/dev/null || true
+    [[ -n "${WATCHDOG_PID:-}" ]] && kill -9 "$WATCHDOG_PID" 2>/dev/null || true
+    [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill -9 "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
+    [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill -9 "$HEALTH_AGENT_PID" 2>/dev/null || true
     log "All services stopped."
 }
 trap cleanup INT TERM EXIT
