@@ -639,11 +639,10 @@ watchdog() {
 watchdog &
 WATCHDOG_PID=$!
 
-LOCK_FILE="/tmp/proj.lock"
+FLAG_DEPLOYED_FILE="/tmp/flag-deployed"
 
-exec 200>"$LOCK_FILE"
-flock -x 200
-log "Lock acquired,"
+> "$FLAG_DEPLOYED_FILE"
+log "Deployed flag"
 
 log "Running... (Ctrl-C to stop)"
 wait "$XRAY_PID"

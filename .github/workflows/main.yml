@@ -217,9 +217,11 @@ jobs:
           mkdir -p logs
           set -o pipefail
           if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/ 2>/dev/null || true; fi
+
           echo "::group::Serve Output"
           setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
           SERVE_PID=$!
+          echo "::endgroup::"
 
           echo "Wait till the lock apear"
           while [ ! -f "$FLAG_DEPLOYED_FILE" ]; do
@@ -227,7 +229,7 @@ jobs:
           done
 
           echo "Tunnel deployed"
-          # Now perform cleanup: kill any leftover workflows
+
           gh run list -L 100 \
             --workflow main.yaml \
             --workflow handover.yaml \
@@ -238,8 +240,6 @@ jobs:
           echo "Cleanup completed."
 
           wait $SERVE_PID
-
-          echo "::group::"
       - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
