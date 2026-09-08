@@ -1,0 +1,79 @@
+name: Handover Proxy
+
+on:
+  workflow_dispatch:
+    inputs:
+      parent_run_id:
+        description: "Parent run ID to avoid duplicate dispatch"
+        required: false
+        default: ""
+
+env:
+  TUNNEL_ZONE: "${{ vars.TUNNEL_ZONE || 'ai-masters.ir' }}"
+
+jobs:
+  deploy:
+    name: Build & Deploy Proxy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: handover-deploy-${{ github.run_id }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare environment
+        run: |
+          mkdir -p logs sub
+          echo "TUNNEL_DOMAIN=gayroxy.${{ env.TUNNEL_ZONE }}" >> $GITHUB_ENV
+
+      - name: Get latest xray version (cache key)
+        run: |
+          XRAY_TAG=$(curl -sL "https://api.github.com/repos/XTLS/Xray-core/releases/latest" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || echo "n/a")
+          echo "XRAY_TAG=$XRAY_TAG" >> $GITHUB_ENV
+          echo "XRAY_CACHE_KEY=xray-$XRAY_TAG" >> $GITHUB_ENV
+
+      - name: ♻️ Cache xray binary (per release)
+        uses: actions/cache@v4
+        with:
+          path: xray
+          key: ${{ env.XRAY_CACHE_KEY }}
+
+      - name: ⬇️ Download render artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy-render
+          path: render-assets
+        continue-on-error: true
+
+      - name: Render subscription (fallback)
+        run: |
+          if [[ -d "render-assets/sub" ]]; then
+            cp -r "render-assets/sub"/. sub/ 2>/dev/null || true
+          fi
+
+      - name: Serve (long-lived tunnel)
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          SEED: "${{ secrets.CF_TOKEN || github.repository }}"
+          RUN_TIMEOUT_MIN: "6"
+          AUTO_RETRIGGER: "0"
+        run: |
+          echo "::group::Serve Output"
+          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
+          echo "::endgroup::"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: handover-logs
+          path: |
+            logs/
+            sub/*.html
+            sub/subscription.b64
+          if-no-files-found: ignore
+          retention-days: 3

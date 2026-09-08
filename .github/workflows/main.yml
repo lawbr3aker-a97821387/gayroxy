@@ -308,12 +308,19 @@ jobs:
           if [[ -d render-assets/sub ]]; then
             cp -r render-assets/sub/. sub/ 2>/dev/null || true
           fi
+
+          # Dispatch handover workflow 1 minute before timeout (at 5min mark)
+          # This runs IN PARALLEL with serve.sh - both connect to the same CF tunnel
+          (sleep 300 && gh workflow run handover.yml -f parent_run_id="$GITHUB_RUN_ID" --ref master) &
+          DISPATCH_PID=$!
+          echo "Handover dispatch armed (pid $DISPATCH_PID, fires at 5min)"
+
           echo "::group::Serve Output"
-          # setsid: run serve.sh as its own process-group leader so its
-          # cleanup can `kill -- -$$` (whole group) — guarantees every pipe
-          # writer dies → tee gets EOF → the step completes on handover.
           setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
+
+          # Kill the dispatch process when serve exits (we're done)
+          kill $DISPATCH_PID 2>/dev/null || true
 
       # No run-end ☁️ Publish step: LIVE_DEPLOY inside serve.sh publishes the
       # live tunnel URL to Cloudflare within seconds of boot.
