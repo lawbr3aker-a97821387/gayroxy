@@ -52,8 +52,14 @@ cleanup() {
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
-    [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+    [[ -n "${RETRIGGER_PID:-}" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
+    [[ -n "${WATCHDOG_PID:-}" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
+    [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
+    [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
     [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
+    # Kill any remaining stragglers in our process group (defensive — keeps
+    # the tee pipe closed so the step actually ends).
+    kill -- -"$$" 2>/dev/null || true
     wait 2>/dev/null || true
     log "All services stopped."
 }
