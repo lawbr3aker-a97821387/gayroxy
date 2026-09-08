@@ -261,14 +261,15 @@ jobs:
     needs: [render, deploy-assets, boot-verify, publish-live]
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 285
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      RUN_TIMEOUT_MIN: 280
+      RUN_TIMEOUT_MIN: "6"
+      RETRIGGER_LEAD_MIN: "1"
     steps:
       - name: Dispatch Handover
         run: |
-          echo "Will dispatch 'handover.yml' workflow in ${{ env.RUN_TIMEOUT_MIN }} minutes..."
-          sleep "${{ env.RUN_TIMEOUT_MIN }}m"
-          gh workflow run "Proxy Handover" --ref master
+          echo "Will dispatch 'handover.yml' workflow in 300 seconds..."
+          sleep 300
+          gh workflow run "Deploy Proxy" --ref master
           echo "Dispatched."

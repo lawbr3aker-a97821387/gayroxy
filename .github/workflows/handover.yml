@@ -1,12 +1,11 @@
 name: "Deploy Proxy"
 
+on:
+  workflow_dispatch:
+
 concurrency:
   group: gayroxy-deploy-handover-${{ github.run_id }}
   cancel-in-progress: true
-
-# on:
-#   push:
-#     branches: [master]
 
 permissions:
   actions: write
@@ -160,7 +159,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/*/*.sh .github/retrigger.sh
+        run: chmod +x scripts/*.sh scripts/*/*.sh 
       - name: Compute cache week
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
@@ -259,14 +258,13 @@ jobs:
     needs: [render, deploy-assets, boot-verify, publish-live]
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 285
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      RUN_TIMEOUT_MIN: 280
     steps:
       - name: Dispatch Handover
         run: |
-          echo "Will dispatch 'main.yml' workflow in ${{ env.RUN_TIMEOUT_MIN }} minutes..."
-          sleep "${{ env.RUN_TIMEOUT_MIN }}m"
+          echo "Will dispatch 'main.yml' workflow in 300 seconds..."
+          sleep 300
           gh workflow run main.yml --ref master
           echo "Dispatched."
