@@ -46,6 +46,7 @@ cleanup() {
     [[ -n "${YIELD_PID:-}" ]] && kill "$YIELD_PID" 2>/dev/null || true
     [[ -n "${YIELD_SIGNAL_PID:-}" ]] && kill "$YIELD_SIGNAL_PID" 2>/dev/null || true
     [[ -n "${YIELD_SENTINEL:-}" ]] && rm -f "$YIELD_SENTINEL" 2>/dev/null || true
+    [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
     wait 2>/dev/null || true
     log "All services stopped."
 }
@@ -540,7 +541,8 @@ fi
 # Instead we write a sentinel file; yield_signal_watcher (below) polls it and
 # signals main to exit.
 YIELD_SENTINEL="${LOG_DIR}/yield-surrender"
-rm -f "$YIELD_SENTINEL"
+RETRIGGER_FIRED_FLAG="${LOG_DIR}/retrigger-fired"
+rm -f "$YIELD_SENTINEL" "$RETRIGGER_FIRED_FLAG"
 if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "${TUNNEL_ID:-}" ]]; then
     YIELD_START_SEC=$(( (RUN_TIMEOUT_MIN - 2 * RETRIGGER_LEAD_MIN) * 60 ))
     (
@@ -555,14 +557,13 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "$
                 touch "$YIELD_SENTINEL"
                 exit 0
             fi
-            # Fallback: successor run exists but hasn't booted cloudflared yet
-            # (concurrency group blocks it). After 60s grace, exit so the
-            # successor can start — accept a brief gap rather than a 15-min stall.
+            # Fallback: successor run was dispatched (retrigger fired) but hasn't
+            # booted cloudflared yet (concurrency group blocks it). After 60s
+            # grace, exit so the successor can start — accept a brief gap rather
+            # than a 15-min stall.
             if (( grace >= 60 )); then
-                succ=$(gh run list --branch "${GITHUB_REF_NAME:-master}" --json databaseId,status \
-                    -q '.[] | select(.databaseId != '"${GITHUB_RUN_ID:-0}"' and (.status == "queued" or .status == "in_progress")) | .databaseId' 2>/dev/null | head -1 || true)
-                if [[ -n "$succ" ]]; then
-                    log "Yield: successor run #$succ exists but not yet serving (connector count=${n:-0}). After 60s grace — yielding to let it start."
+                if [[ -f "${RETRIGGER_FIRED_FLAG:-}" ]]; then
+                    log "Yield: retrigger fired (flag exists) but successor not yet serving (connector count=${n:-0}). After 60s grace — yielding to let it start."
                     touch "$YIELD_SENTINEL"
                     exit 0
                 fi
@@ -623,6 +624,7 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
         else
             log "Auto-re-trigger: dispatching next run (${RUN_TIMEOUT_MIN}-${RETRIGGER_LEAD_MIN}min elapsed)..."
             gh workflow run "$WF_NAME" --ref "$REF" 2>&1 || true
+            touch "$RETRIGGER_FIRED_FLAG"
         fi
     ) &
     RETRIGGER_PID=$!
