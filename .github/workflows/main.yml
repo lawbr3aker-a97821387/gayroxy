@@ -309,7 +309,10 @@ jobs:
             cp -r render-assets/sub/. sub/ 2>/dev/null || true
           fi
           echo "::group::Serve Output"
-          ./scripts/serve.sh 2>&1 | tee logs/run.log
+          # setsid: run serve.sh as its own process-group leader so its
+          # cleanup can `kill -- -$$` (whole group) — guarantees every pipe
+          # writer dies → tee gets EOF → the step completes on handover.
+          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
 
       # No run-end ☁️ Publish step: LIVE_DEPLOY inside serve.sh publishes the

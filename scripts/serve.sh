@@ -67,6 +67,10 @@ cleanup() {
     [[ -n "${WATCHDOG_PID:-}" ]] && kill -9 "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill -9 "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
     [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill -9 "$HEALTH_AGENT_PID" 2>/dev/null || true
+    # Kill the entire process group (works when the workflow wraps us with
+    # `setsid`, making us the group leader). Closes EVERY pipe writer, so the
+    # `tee` in the workflow gets EOF and the step actually completes.
+    kill -- -"$$" 2>/dev/null || true
     log "All services stopped."
 }
 trap cleanup INT TERM EXIT
