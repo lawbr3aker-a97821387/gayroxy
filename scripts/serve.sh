@@ -44,7 +44,6 @@ cleanup() {
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
     [[ -n "${RETRIGGER_PID:-}" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
-    [[ -n "${YIELD_SENTINEL:-}" ]] && rm -f "$YIELD_SENTINEL" 2>/dev/null || true
     [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
     wait 2>/dev/null || true
     log "All services stopped."
@@ -527,20 +526,13 @@ if [[ "$LIVE_DEPLOY" == "1" && "$RENDER_ONLY" != "1" ]]; then
 fi
 
 # ─── Yield-to-successor (seamless handover) ─────────────────────────────────
-# Cloudflare-native HA: this run connected cloudflared to the named tunnel and
-# its SUCCESSOR will do the same while we're still alive (dispatched
-# RETRIGGER_LEAD_MIN min early). Two connectors on one tunnel → CF load-
-# balances between them; when we exit, existing+new traffic drains to the
-# successor within seconds. No lock, no wait: we just stop early once the
-# successor is actually registered, so clients never see a dead endpoint.
-#
-# IMPLEMENTATION: the retrigger subshell writes RETRIGGER_FIRED_FLAG after
-# dispatching (or finding an existing successor). The main loop polls this
-# flag every 5s and exits cleanly when it appears — no separate yield
-# subshell or signal watcher needed.
-YIELD_SENTINEL="${LOG_DIR}/yield-surrender"
+# Cloudflare-native HA: each run boots its own cloudflared connector to the
+# named tunnel. A successor is dispatched RETRIGGER_LEAD_MIN before this run's
+# timeout. When the retrigger fires, it signals this run to exit so the
+# concurrency group frees and the successor can start. CF then drains traffic
+# to the successor's connector in seconds.
 RETRIGGER_FIRED_FLAG="${LOG_DIR}/retrigger-fired"
-rm -f "$YIELD_SENTINEL" "$RETRIGGER_FIRED_FLAG"
+rm -f "$RETRIGGER_FIRED_FLAG"
 
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     # Register free Cloudflare WARP identities BEFORE the health agent generates
@@ -577,9 +569,11 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
             gh workflow run "$WF_NAME" --ref "$REF" 2>&1 || true
         fi
         # Write flag in BOTH cases: a successor exists (pending/in_progress)
-        # OR was just dispatched. The yield monitor uses this to know it's
-        # safe to exit — regardless of whether we dispatched it or found it.
+        # OR was just dispatched. Signal main to exit so the concurrency group
+        # frees and the successor can start its own tunnel.
         touch "$RETRIGGER_FIRED_FLAG"
+        log "Auto-re-trigger: signaling main to exit for seamless handover."
+        kill -TERM "$$" 2>/dev/null || true
     ) &
     RETRIGGER_PID=$!
     log "Auto-re-trigger armed: dispatch in ${sleep_sec}s (pid ${RETRIGGER_PID})"
@@ -616,17 +610,7 @@ watchdog &
 WATCHDOG_PID=$!
 
 log "Running... (Ctrl-C to stop)"
-# Poll loop: wait for xray to die OR for the retrigger flag to appear.
-# When the flag appears, a successor run exists — exit cleanly so the
-# concurrency group frees and the successor can boot its own tunnel.
-while kill -0 "$XRAY_PID" 2>/dev/null; do
-    if [[ -f "${RETRIGGER_FIRED_FLAG:-}" ]]; then
-        log "yield: retrigger fired — successor exists. Exiting for seamless handover."
-        exit 0   # EXIT trap → cleanup kills our cloudflared; successor takes over
-    fi
-    sleep 5
-done
-# Xray died on its own — fall through to cleanup.
+wait "$XRAY_PID"
 # Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
 wait "$WATCHDOG_PID" 2>/dev/null || true
 wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
