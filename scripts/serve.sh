@@ -545,14 +545,29 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "$
     YIELD_START_SEC=$(( (RUN_TIMEOUT_MIN - 2 * RETRIGGER_LEAD_MIN) * 60 ))
     (
         sleep "$YIELD_START_SEC"
-        log "Yield window open — watching for a second tunnel connector..."
+        log "Yield window open — watching for a second tunnel connector or successor run..."
+        grace=0
         while :; do
+            # Fast path: 2 connectors = successor is fully up → seamless handover
             n=$(named_tunnel_connector_count)
             if [[ "${n:-0}" -ge 2 ]]; then
                 log "Successor connector registered (${n} active) — yielding tunnel. CF drains clients to successor in seconds."
                 touch "$YIELD_SENTINEL"
                 exit 0
             fi
+            # Fallback: successor run exists but hasn't booted cloudflared yet
+            # (concurrency group blocks it). After 60s grace, exit so the
+            # successor can start — accept a brief gap rather than a 15-min stall.
+            if (( grace >= 60 )); then
+                succ=$(gh run list --branch "${GITHUB_REF_NAME:-master}" --json databaseId,status \
+                    -q '.[] | select(.databaseId != '"${GITHUB_RUN_ID:-0}"' and (.status == "queued" or .status == "in_progress")) | .databaseId' 2>/dev/null | head -1 || true)
+                if [[ -n "$succ" ]]; then
+                    log "Yield: successor run #$succ exists but not yet serving (connector count=${n:-0}). After 60s grace — yielding to let it start."
+                    touch "$YIELD_SENTINEL"
+                    exit 0
+                fi
+            fi
+            grace=$((grace + 15))
             sleep 15
         done
     ) &
