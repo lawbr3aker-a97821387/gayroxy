@@ -40,7 +40,7 @@ NGINX_CONF="${XRAY_DIR}/nginx.conf"
 XRAY_PID=""; CLOUDFLARED_PID=""
 cleanup() {
     log "Stopping services..."
-    SHUTTING_DOWN=1
+    touch "$SHUTTING_DOWN_FLAG" 2>/dev/null || true
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
@@ -399,13 +399,14 @@ start_xray
 # Xray supervisor: restart on crash (max 3 restarts, then hard exit)
 XRAY_RESTARTS=0
 MAX_XRAY_RESTARTS=3
-SHUTTING_DOWN=0
+SHUTTING_DOWN_FLAG="${LOG_DIR}/shutting-down"
+rm -f "$SHUTTING_DOWN_FLAG"
 supervise_xray() {
     while :; do
         wait "$XRAY_PID" 2>/dev/null || true
-        # If we're here, Xray exited
-        if (( SHUTTING_DOWN )); then
-            exit 0   # Handover/cleanup — don't restart
+        # If we're shutting down (handover/cleanup), don't restart
+        if [[ -f "${SHUTTING_DOWN_FLAG:-}" ]]; then
+            exit 0
         fi
         if ! kill -0 "$XRAY_PID" 2>/dev/null; then
             if (( XRAY_RESTARTS >= MAX_XRAY_RESTARTS )); then
@@ -617,8 +618,8 @@ WATCHDOG_PID=$!
 log "Running... (Ctrl-C to stop)"
 wait "$XRAY_PID"
 # Exited because xray died OR because cleanup killed it (handover).
-# If SHUTTING_DOWN, the EXIT trap already ran cleanup — just exit.
-if (( SHUTTING_DOWN )); then
+# If the shutdown flag is set, the EXIT trap already ran cleanup — just exit.
+if [[ -f "${SHUTTING_DOWN_FLAG:-}" ]]; then
     exit 0
 fi
 # Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
