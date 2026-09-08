@@ -228,13 +228,15 @@ jobs:
 
           echo "Tunnel deployed"
 
+          set +e
           gh run list -L 100 \
             --workflow .github/workflows/main.yml \
             --workflow .github/workflows/handover.yml \
             --json status,databaseId \
             -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
             | grep -v "${{ github.run_id }}" \
-            | xargs -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel || true
+          set -e
           echo "Cleanup completed."
 
           wait $SERVE_PID
