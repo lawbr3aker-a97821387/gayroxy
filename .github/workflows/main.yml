@@ -1,7 +1,7 @@
 name: "Build & Deploy Proxy"
 
 concurrency:
-  group: gayroxy-deploy-${{ github.sha }}
+  group: gayroxy-deploy-${{ github.run_id }}
   # cancel-in-progress: true
 
 on:
@@ -232,8 +232,8 @@ jobs:
 
           set +e
           gh run list -L 100 \
-            --workflow .github/workflows/main.yml \
-            --workflow .github/workflows/handover.yml \
+            --workflow "Build & Deploy Proxy" \
+            --workflow "Deploy Proxy" \
             --json status,databaseId \
             -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
             | grep -v "${{ github.run_id }}" \
