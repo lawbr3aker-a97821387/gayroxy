@@ -569,6 +569,7 @@ if [[ "$AUTO_RETRIGGER" == "1" && -n "$CF_TOKEN" && -n "$TUNNEL_DOMAIN" && -n "$
                 fi
             fi
             grace=$((grace + 15))
+            log "Yield check: grace=${grace}s connector=${n:-0} flag=$([ -f "${RETRIGGER_FIRED_FLAG:-/dev/null}" ] && echo YES || echo NO)"
             sleep 15
         done
     ) &
