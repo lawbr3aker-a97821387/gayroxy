@@ -156,6 +156,8 @@ jobs:
           echo "::group::Serve Output"
           setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
           SERVE_PID=$!
+          echo "SERVE_PID=$SERVE_PID" >> $GITHUB_ENV
+          echo "Tunnel PID: $SERVE_PID"
           echo "::endgroup::"
 
           echo "Waiting for tunnel to deploy..."
