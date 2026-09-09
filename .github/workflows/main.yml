@@ -9,6 +9,7 @@ on:
     branches: [master]
   schedule:
     - cron: "20 */5 * * *"
+  workflow_dispatch:
 
 permissions:
   actions: write
@@ -194,7 +195,7 @@ jobs:
       - name: Dispatch Handover
         run: |
           RETRIGGER_DELAY_MIN=$(( RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN ))
-          echo "Will dispatch 'Build & Deploy Proxy' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
-          sleep "${{ RETRIGGER_DELAY_MIN }}m"
+          echo "Will dispatch 'Build & Deploy Proxy' workflow in $RETRIGGER_DELAY_MIN minutes..."
+          sleep "${RETRIGGER_DELAY_MIN}m"   # 'm' suffix works with GNU sleep
           gh workflow run 'Build & Deploy Proxy' --ref master
           echo "Dispatched."
