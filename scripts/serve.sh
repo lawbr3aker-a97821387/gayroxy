@@ -534,6 +534,7 @@ fi
 
 if [[ -z "${CF_TOKEN:-}" ]]; then
     warn "CF_TOKEN missing for ROTATING_WARP — skipping..."
+    HEALTH_AGENT_PID=""
 else
     # Register free Cloudflare WARP identities BEFORE the health agent generates
     # the aux xray configs, so its wireguard outbounds use real planes when
@@ -545,8 +546,6 @@ else
     ) &
     HEALTH_AGENT_PID=$!
     log "Health agent started (pid ${HEALTH_AGENT_PID}; rotation 1min=${ROTATE1MIN_INTERVAL}s 2min=${ROTATE2MIN_INTERVAL}s 5min=${ROTATE5MIN_INTERVAL}s; warp 2min=${ROTATEWARP2MIN_INTERVAL}s 4min=${ROTATEWARP4MIN_INTERVAL}s 6min=${ROTATEWARP6MIN_INTERVAL}s; parallel=${PARALLEL_PROBES})"
-else
-    HEALTH_AGENT_PID=""
 fi
 
 # ─── Tunnel watchdog (medium #5) ───────────────────────────────────────────
