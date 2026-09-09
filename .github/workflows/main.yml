@@ -1,7 +1,7 @@
 name: "Build Deploy Proxy"
 
 concurrency:
-  group: gayroxy-deploy-${{ github.run_id }}
+  group: gayroxy-deploy-main-${{ github.run_id }}
   cancel-in-progress: true
 
 on:
@@ -19,7 +19,7 @@ env:
   EXTERNAL_SUB_URLS: ${{ secrets.EXTERNAL_SUB_URLS }}
   WORKER_URL: ${{ vars.WORKER_URL }}
   WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
-  TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE || 'ai-masters.ir' }}
+  TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE }}
   RUN_TIMEOUT_MIN: "285"
   RETRIGGER_LEAD_MIN: "5"
 
@@ -39,20 +39,20 @@ jobs:
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
 
-      - name: ♻️ Cache geo databases (weekly)
+      - name: Cache geodatabases (weekly)
         uses: actions/cache@v4
         with:
           path: geo
           key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
           restore-keys: geo-${{ runner.os }}-
 
-      - name: ⚡ Render assets
+      - name: Render assets
         env:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
-          SEED: "${{ secrets.CF_TOKEN || github.repository }}"
+          SEED: "${{ secrets.CF_TOKEN }}${{ github.repository }}"
         run: |
           mkdir -p logs
           set -o pipefail
@@ -60,7 +60,7 @@ jobs:
           ./scripts/render/build-assets.sh 2>&1 | tee logs/render.log
           echo "::endgroup::"
 
-      - name: ☁️ Deploy assets to Cloudflare Worker (once)
+      - name: Deploy assets to Cloudflare Worker (once)
         env:
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           WORKER_DOMAIN: ${{ env.WORKER_DOMAIN }}
@@ -75,17 +75,14 @@ jobs:
             echo "::endgroup::"
           fi
 
-      - name: 🔍 Verify Worker endpoint serves
+      - name: Verify Worker endpoint serves
         run: |
           set -o pipefail
-          WORKER_URL="${{ env.WORKER_URL }}"
-          if [[ -z "$WORKER_URL" ]]; then
-            WORKER_URL="https://${{ env.TUNNEL_ZONE }}/sub"
-          fi
-          echo "Verifying $WORKER_URL..."
-          curl -sSf --max-time 30 -k "$WORKER_URL" >/dev/null
+          WORKER_URL="${WORKER_URL:-https://${TUNNEL_ZONE}/sub}"
+          echo "Verifying ${WORKER_URL}..."
+          curl -sSf --max-time 30 -k "${WORKER_URL}" >/dev/null
 
-      - name: 📤 Upload artifacts
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -113,14 +110,14 @@ jobs:
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
 
-      - name: ♻️ Cache geo databases (weekly)
+      - name: Cache geodatabases (weekly)
         uses: actions/cache@v4
         with:
           path: geo
           key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
           restore-keys: geo-${{ runner.os }}-
 
-      - name: ⬇️ Download render artifacts
+      - name: Download render artifacts
         uses: actions/download-artifact@v4
         with:
           name: proxy-assets
@@ -140,7 +137,7 @@ jobs:
           key: xray-${{ runner.os }}-${{ steps.xrayver.outputs.tag }}
           restore-keys: xray-${{ runner.os }}-
 
-      - name: ▶️ Run serve (long-lived tunnel + health agent)
+      - name: Run serve (long-lived tunnel + health agent)
         id: serve
         env:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
@@ -148,15 +145,16 @@ jobs:
           ROTATEWARP2MIN_INTERVAL: "120"
           ROTATEWARP4MIN_INTERVAL: "240"
           ROTATEWARP6MIN_INTERVAL: "360"
-          PARALLEL_PROBES: "10"
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          SEED: "${{ secrets.CF_TOKEN || github.repository }}"
+          SEED: "${{ secrets.CF_TOKEN }}${{ github.repository }}"
           FLAG_DEPLOYED_FILE: "/tmp/flag-deployed"
         run: |
           mkdir -p logs
           set -o pipefail
+
+          # Bring rendered assets into place
           if [[ -d render-assets/sub ]]; then
             cp -r render-assets/sub/. sub/ 2>/dev/null || true
           fi
@@ -167,30 +165,34 @@ jobs:
           echo "::endgroup::"
 
           echo "Waiting for tunnel to deploy..."
-          while [ ! -f "$FLAG_DEPLOYED_FILE" ]; do
+          while [[ ! -f "$FLAG_DEPLOYED_FILE" ]]; do
             sleep 10
           done
           echo "Tunnel deployed."
 
-          # Cleanup stale runs
+          # Cleanup stale runs (any older in-progress main/backup run)
           set +e
           {
-            gh run list -L 100 --workflow "Build & Deploy Proxy" \
+            gh run list -L 100 --workflow "Build Deploy Proxy" \
               --json status,databaseId \
-              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
-            gh run list -L 100 --workflow "Proxy Handover" \
+              --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
+              | sort \
+              | grep -v "${{ github.run_id }}" \
+              | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+            gh run list -L 100 --workflow "Build Deploy Proxy (Backup)" \
               --json status,databaseId \
-              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
-          } | sort -u \
-            | grep -v "${{ github.run_id }}" \
-            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+              --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
+              | sort \
+              | grep -v "${{ github.run_id }}" \
+              | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+          } >/dev/null 2>&1
           set -e
           echo "Cleanup completed."
 
           trap 'kill $SERVE_PID $CLEANUP_PID 2>/dev/null; wait; exit 0' TERM
           wait "$SERVE_PID"
 
-      - name: 📤 Upload artifacts
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -209,11 +211,10 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
-      - name: Dispatch Build Deploy Proxy
+      - name: Dispatch backup workflow
         run: |
-          SLEEP_MIN="$(( RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN ))"
-          echo "Will dispatch 'Build Deploy Proxy' workflow in ${SLEEP_MIN}m..."
-          sleep "${SLEEP_MIN}"
-
-          gh workflow run "Build Deploy Proxy" --ref master
-          echo "Dispatched."
+          SLEEP_MIN=$((RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN))
+          echo "Will dispatch 'Build Deploy Proxy (Backup)' workflow in ${SLEEP_MIN}m..."
+          sleep "${SLEEP_MIN}m"
+          gh workflow run "Build Deploy Proxy (Backup)" --ref master
+          echo "Dispatched backup."
