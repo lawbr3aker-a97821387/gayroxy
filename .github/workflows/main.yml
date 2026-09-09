@@ -205,7 +205,11 @@ jobs:
           echo "Cleanup completed."
 
           trap 'kill "$SERVE_PID" "$CLEANUP_PID" 2>/dev/null; wait; exit 0' TERM
-          wait "$SERVE_PID"
+          # Poll instead of wait — SERVE_PID is not a child of this shell
+          while kill -0 "$SERVE_PID" 2>/dev/null; do
+            sleep 10
+          done
+          echo "Serve process ($SERVE_PID) has exited."
 
       - name: Upload artifacts
         if: always()
