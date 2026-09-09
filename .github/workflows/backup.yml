@@ -191,7 +191,7 @@ jobs:
       - name: Dispatch Handover
         run: |
           RETRIGGER_DELAY_MIN=$(( RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN ))
-          echo "Will dispatch 'Build & Deploy Proxy (Backup)' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
-          sleep "${{ RETRIGGER_DELAY_MIN }}m"
+          echo "Will dispatch 'Build & Deploy Proxy (Backup)' workflow in $RETRIGGER_DELAY_MIN minutes..."
+          sleep "${RETRIGGER_DELAY_MIN}m"   # 'm' suffix works with GNU sleep
           gh workflow run 'Build & Deploy Proxy (Backup)' --ref master
           echo "Dispatched."
