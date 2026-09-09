@@ -18,7 +18,7 @@ env:
   TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE || 'ai-masters.ir' }}
 
 jobs:
-  render:
+  assets:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -49,6 +49,29 @@ jobs:
           echo "::group::Render Output"
           ./scripts/render/build-assets.sh 2>&1 | tee logs/render.log
           echo "::endgroup::"
+      - name: ☁️ Deploy assets to Cloudflare Worker (once)
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          WORKER_DOMAIN: ${{ env.WORKER_DOMAIN }}
+          WORKER_URL: ${{ env.WORKER_URL }}
+          TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
+        run: |
+          set -o pipefail
+          if [[ -f sub/subscription.b64 ]]; then
+            export SUB_DIR="$PWD/sub"
+            echo "::group::Cloudflare Deploy"
+            ./scripts/publish/deploy-cf.sh 2>&1
+            echo "::endgroup::"
+          fi
+      - name: 🔍 Verify Worker endpoint serves
+        run: |
+          set -o pipefail
+          WORKER_URL="${{ env.WORKER_URL }}"
+          if [[ -z "$WORKER_URL" ]]; then
+            WORKER_URL="https://${{ env.TUNNEL_ZONE }}/sub"
+          fi
+          echo "Verifying $WORKER_URL..."
+          curl -sSf --max-time 30 -k "$WORKER_URL" >/dev/null
       - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -60,106 +83,17 @@ jobs:
             sub/subscription.b64
           if-no-files-found: ignore
           retention-days: 3
-  deploy-assets:
-    needs: render
-    if: always()
+
+  serve:
+    needs: assets
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Make scripts executable
-        run: chmod +x scripts/publish/deploy-cf.sh
-      - name: Compute cache week
-        id: week
-        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-      - name: ♻️ Cache geo databases (weekly)
-        uses: actions/cache@v4
-        with:
-          path: geo
-          key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
-          restore-keys: geo-${{ runner.os }}-
-      - name: ⬇️ Download render artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: proxy-assets
-          path: render-assets
-      - name: ☁️ Deploy assets to Cloudflare Worker + KV
-        env:
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
-          WORKER_DOMAIN: ${{ env.WORKER_DOMAIN }}
-        run: |
-          set -o pipefail
-          echo "::group::Cloudflare Deploy"
-          mkdir -p sub
-          if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/; fi
-          if [[ -f sub/subscription.b64 ]]; then
-            export SUB_DIR="$PWD/sub"
-            ./scripts/publish/deploy-cf.sh 2>&1
-          fi
-          echo "::group::"
-
-  boot-verify:
-    needs: deploy-assets
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Make scripts executable
         run: chmod +x scripts/*.sh scripts/*/*.sh
-      - name: 🔍 Verify Worker endpoint serves
-        run: |
-          set -o pipefail
-          WORKER_URL="${{ env.WORKER_URL }}"
-          if [[ -z "$WORKER_URL" ]]; then
-            WORKER_URL="https://${{ env.TUNNEL_ZONE }}/sub"
-          fi
-          echo "Verifying $WORKER_URL..."
-          curl -sSf --max-time 30 -k "$WORKER_URL" >/dev/null
-
-  publish-live:
-    needs: boot-verify
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Make scripts executable
-        run: chmod +x scripts/publish/publish-live.sh
-      - name: ⬇️ Download render artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: proxy-assets
-          path: render-assets
-      - name: 🌐 Publish live sub URL to Cloudflare Worker
-        env:
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
-          WORKER_URL: ${{ env.WORKER_URL }}
-          TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
-        run: |
-          mkdir -p sub logs
-          if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/; fi
-          export SUB_DIR="$PWD/sub"
-          echo "::group::Publish Live"
-          ./scripts/publish/publish-live.sh 2>&1
-          echo "::group::"
-  serve:
-    needs: [render, deploy-assets, boot-verify, publish-live]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 285
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Make scripts executable
-        run: chmod +x scripts/*.sh scripts/*/*.sh 
       - name: Compute cache week
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
@@ -192,8 +126,8 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "0"
-          # RUN_TIMEOUT_MIN: "6"
-          # RETRIGGER_LEAD_MIN: "1"
+          RUN_TIMEOUT_MIN: "6"
+          RETRIGGER_LEAD_MIN: "1"
           LIVE_DEPLOY: "1"
           HEALTH_AGENT: "1"
           HEALTH_INTERVAL: "600"
@@ -209,44 +143,18 @@ jobs:
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SEED: "${{ secrets.CF_TOKEN || github.repository }}"
-          FLAG_DEPLOYED_FILE: "/tmp/flag-deployed"
         run: |
           mkdir -p logs
           set -o pipefail
           if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/ 2>/dev/null || true; fi
-
           echo "::group::Serve Output"
-          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
-          SERVE_PID=$!
+          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
           echo "::endgroup::"
-
-          echo "Wait till the lock apear"
-          while [ ! -f "$FLAG_DEPLOYED_FILE" ]; do
-              sleep 10
-          done
-
-          echo "Tunnel deployed"
-
-          set +e
-          {
-            gh run list -L 100 --workflow "Build & Deploy Proxy" \
-              --json status,databaseId \
-              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
-            gh run list -L 100 --workflow "Proxy Handover" \
-              --json status,databaseId \
-              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
-          } | sort -u \
-            | grep -v "${{ github.run_id }}" \
-            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
-          set -e
-          echo "Cleanup completed."
-
-          wait $SERVE_PID
       - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: proxy-logs
+          name: handover-logs
           path: |
             logs/
             sub/*.html
@@ -255,8 +163,7 @@ jobs:
           retention-days: 3
 
   retrigger:
-    needs: [render, deploy-assets, boot-verify, publish-live]
-    if: always()
+    needs: assets
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

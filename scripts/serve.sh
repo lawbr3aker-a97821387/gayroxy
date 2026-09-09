@@ -14,9 +14,7 @@ source "${SCRIPT_DIR}/scripts/lib/cloudflare.sh"
 
 export RENDER_ONLY=0
 export HEALTH_AGENT=1
-# export AUTO_RETRIGGER="${AUTO_RETRIGGER:-1}"
 # RUN_TIMEOUT_MIN="${RUN_TIMEOUT_MIN:-240}"
-# RETRIGGER_LEAD_MIN="${RETRIGGER_LEAD_MIN:-15}"
 WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-120}"
 WATCHDOG_FAILS="${WATCHDOG_FAILS:-3}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-120}"
@@ -52,18 +50,15 @@ cleanup() {
     [[ -f "${XRAY_DIR}/nginx.pid" ]] && nginx -c "${NGINX_CONF}" -s stop 2>/dev/null || true
     [[ -n "$CLOUDFLARED_PID" ]] && kill "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
-    # [[ -n "${RETRIGGER_PID:-}" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
     [[ -n "${WATCHDOG_PID:-}" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
     [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
-    # [[ -n "${RETRIGGER_FIRED_FLAG:-}" ]] && rm -f "$RETRIGGER_FIRED_FLAG" 2>/dev/null || true
     # Give tracked children a moment to die, then KILL the survivors.
     # NEVER `wait` — the watchdog/health-agent loops never exit, so an
     # unbounded wait would wedge the trap handler (and thus the run).
     sleep 2
     [[ -n "$CLOUDFLARED_PID" ]] && kill -9 "$CLOUDFLARED_PID" 2>/dev/null || true
     [[ -n "$XRAY_PID" ]] && kill -9 "$XRAY_PID" 2>/dev/null || true
-    # [[ -n "${RETRIGGER_PID:-}" ]] && kill -9 "$RETRIGGER_PID" 2>/dev/null || true
     [[ -n "${WATCHDOG_PID:-}" ]] && kill -9 "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "${XRAY_SUPERVISOR_PID:-}" ]] && kill -9 "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
     [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill -9 "$HEALTH_AGENT_PID" 2>/dev/null || true
@@ -555,15 +550,6 @@ if [[ "$LIVE_DEPLOY" == "1" && "$RENDER_ONLY" != "1" ]]; then
     fi
 fi
 
-# ─── Yield-to-successor (seamless handover) ─────────────────────────────────
-# Cloudflare-native HA: each run boots its own cloudflared connector to the
-# named tunnel. A successor is dispatched RETRIGGER_LEAD_MIN before this run's
-# timeout. When the retrigger fires, it signals this run to exit so the
-# concurrency group frees and the successor can start. CF then drains traffic
-# to the successor's connector in seconds.
-# RETRIGGER_FIRED_FLAG="${LOG_DIR}/retrigger-fired"
-# rm -f "$RETRIGGER_FIRED_FLAG"
-
 if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
     # Register free Cloudflare WARP identities BEFORE the health agent generates
     # the aux xray configs, so its wireguard outbounds use real planes when
@@ -578,38 +564,6 @@ if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
 else
     HEALTH_AGENT_PID=""
 fi
-
-# if [[ "$AUTO_RETRIGGER" == "1" && -n "${GH_TOKEN:-}" ]]; then
-#     sleep_sec=$(( (RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN) * 60 ))
-#     (
-#         sleep "$sleep_sec"
-#         # Skip if a successor run already exists (retrigger.sh or manual dispatch)
-#         # Note: gh run list filters by file path (.git/workflows/main.yml), not
-#         # workflow name (API returns "Build & Deploy <run_id>")
-#         WF_NAME="${GITHUB_WORKFLOW:-Build & Deploy Proxy}"
-#         REF="${GITHUB_REF_NAME:-master}"
-#         existing=$(gh run list --branch "$REF" \
-#             --json databaseId,status,workflowName --jq \
-#             '.[] | select(.databaseId != '"$GITHUB_RUN_ID"' and .workflowName == "'"$WF_NAME"'" and .status != "completed") | .databaseId' \
-#             2>/dev/null | head -1)
-#         if [[ -n "$existing" ]]; then
-#             log "Auto-re-trigger: successor #$existing already running — skipping dispatch."
-#         else
-#             log "Auto-re-trigger: dispatching next run (${RUN_TIMEOUT_MIN}-${RETRIGGER_LEAD_MIN}min elapsed)..."
-#             gh workflow run "$WF_NAME" --ref "$REF" 2>&1 || true
-#         fi
-#         # Write flag in BOTH cases: a successor exists (pending/in_progress)
-#         # OR was just dispatched. Signal main to exit so the concurrency group
-#         # frees and the successor can start its own tunnel.
-#         touch "$RETRIGGER_FIRED_FLAG"
-#         log "Auto-re-trigger: signaling main to exit for seamless handover."
-#         kill -TERM "$$" 2>/dev/null || true
-#     ) &
-#     RETRIGGER_PID=$!
-#     log "Auto-re-trigger armed: dispatch in ${sleep_sec}s (pid ${RETRIGGER_PID})"
-# else
-#     RETRIGGER_PID=""
-# fi
 
 # ─── Tunnel watchdog (medium #5) ───────────────────────────────────────────
 # If the public endpoint stops responding, signal the main process to exit
@@ -654,6 +608,5 @@ fi
 # Reached only if xray exits; watchdog signals TERM to main which runs cleanup.
 wait "$WATCHDOG_PID" 2>/dev/null || true
 wait "$XRAY_SUPERVISOR_PID" 2>/dev/null || true
-# [[ -n "$RETRIGGER_PID" ]] && kill "$RETRIGGER_PID" 2>/dev/null || true
 [[ -n "${HEALTH_AGENT_PID:-}" ]] && kill "$HEALTH_AGENT_PID" 2>/dev/null || true
 exit 0
