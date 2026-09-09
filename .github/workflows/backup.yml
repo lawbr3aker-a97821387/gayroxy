@@ -33,7 +33,7 @@ jobs:
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
       - name: ♻️ Cache geo databases (weekly)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: geo
           key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
@@ -100,7 +100,7 @@ jobs:
         id: week
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
       - name: ♻️ Cache geo databases (weekly)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: geo
           key: geo-${{ runner.os }}-${{ steps.week.outputs.week }}
@@ -117,7 +117,7 @@ jobs:
             | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1)
           echo "tag=${tag:-unknown}" >> "$GITHUB_OUTPUT"
       - name: ♻️ Cache xray binary (per release)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: xray
           key: xray-${{ runner.os }}-${{ steps.xrayver.outputs.tag }}
