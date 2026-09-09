@@ -1204,6 +1204,8 @@ try:
 except Exception: print('? 127.0.0.1:10050 warpsel')
 PY
 )"
+  local prev_tag
+  prev_tag=$(python3 -c 'import sys,json; print(json.load(open(sys.argv[1])).get("tag",""))' "$state" 2>/dev/null || true)
   client_port=$(warp_probe_client_port "$tier")
   local candidates tag nhost
   # pick up to N distinct candidate tags from the live set (never the current).
@@ -1268,7 +1270,17 @@ PY
     fi
   done
   if [[ -z "$candidate_used" ]]; then
-    log "Rotate[$tier]: no live candidate, keeping current egress ($prev_host)"
+    # warp_probe_plane() already switched the balancer to the last dead
+    # candidate tag — restore the pre-attempt tag so the tier keeps serving.
+    if [[ -n "${prev_tag:-}" ]]; then
+      if "$XRAY_BIN" api bo --server="$api" "$balancer" "$prev_tag" >/dev/null 2>&1; then
+        log "Rotate[$tier]: no live candidate; restored previous egress ($prev_host / $prev_tag)"
+      else
+        warn "Rotate[$tier]: no live candidate AND failed to restore previous tag ($prev_host / $prev_tag) — tier serving a dead plane until the next rotation."
+      fi
+    else
+      warn "Rotate[$tier]: no live candidate and no previous tag to restore (first rotation?) — tier may serve a dead plane until the next rotation."
+    fi
   fi
 }
 
