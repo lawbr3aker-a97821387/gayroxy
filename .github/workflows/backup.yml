@@ -142,8 +142,6 @@ jobs:
         env:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
-          AUTO_RETRIGGER: "0"
-          HEALTH_AGENT: "0"
           ROTATEWARP2MIN_INTERVAL: "120"
           ROTATEWARP4MIN_INTERVAL: "240"
           ROTATEWARP6MIN_INTERVAL: "360"

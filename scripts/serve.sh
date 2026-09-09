@@ -545,7 +545,7 @@ else
         exec ./scripts/agent/health-agent.sh
     ) &
     HEALTH_AGENT_PID=$!
-    log "Health agent started (pid ${HEALTH_AGENT_PID}; rotation 1min=${ROTATE1MIN_INTERVAL}s 2min=${ROTATE2MIN_INTERVAL}s 5min=${ROTATE5MIN_INTERVAL}s; warp 2min=${ROTATEWARP2MIN_INTERVAL}s 4min=${ROTATEWARP4MIN_INTERVAL}s 6min=${ROTATEWARP6MIN_INTERVAL}s; parallel=${PARALLEL_PROBES})"
+  log "Health agent started (pid ${HEALTH_AGENT_PID}; warp 2min=${ROTATEWARP2MIN_INTERVAL}s 4min=${ROTATEWARP4MIN_INTERVAL}s 6min=${ROTATEWARP6MIN_INTERVAL}s)"
 fi
 
 # ─── Tunnel watchdog (medium #5) ───────────────────────────────────────────
