@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────────────
-# serve.sh — LONG-LIVED supervisor job (runs on the 240-min runner).
-# Boots xray+nginx+cloudflared tunnel, then owns health-agent (background child),
-# auto-re-trigger, and the tunnel watchdog for the full job lifetime. This is the
+# serve.sh — long-lived supervisor: xray + nginx + cloudflared tunnel
+# Wraps in setsid on the 285-min runner; dispatches backup at 280-min mark.
+# Health-agent with WARP rotation only (non-WARP rotation configs removed).
+#
 # ONLY job allowed to hold long-lived processes (GitHub gives each job a fresh
 # runner; a process cannot outlive its job).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -13,19 +13,19 @@ source "${SCRIPT_DIR}/scripts/lib/common.sh"
 source "${SCRIPT_DIR}/scripts/lib/cloudflare.sh"
 
 export RENDER_ONLY=0
-export HEALTH_AGENT=1
+export HEALTH_AGENT="0"
 # RUN_TIMEOUT_MIN="${RUN_TIMEOUT_MIN:-240}"
 WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-120}"
 WATCHDOG_FAILS="${WATCHDOG_FAILS:-3}"
-HEALTH_INTERVAL="${HEALTH_INTERVAL:-120}"
-SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-1800}"
-ROTATE1MIN_INTERVAL="${ROTATE1MIN_INTERVAL:-60}"
-ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
-ROTATE5MIN_INTERVAL="${ROTATE5MIN_INTERVAL:-300}"
+# REMOVED: HEALTH_INTERVAL="${HEALTH_INTERVAL:-120}"
+# REMOVED: SUBS_REFRESH_INTERVAL="${SUBS_REFRESH_INTERVAL:-1800}"
+# REMOVED: ROTATE1MIN_INTERVAL="${ROTATE1MIN_INTERVAL:-60}"
+# REMOVED: ROTATE2MIN_INTERVAL="${ROTATE2MIN_INTERVAL:-120}"
+# REMOVED: ROTATE5MIN_INTERVAL="${ROTATE5MIN_INTERVAL:-300}"
 ROTATEWARP2MIN_INTERVAL="${ROTATEWARP2MIN_INTERVAL:-120}"
 ROTATEWARP4MIN_INTERVAL="${ROTATEWARP4MIN_INTERVAL:-240}"
 ROTATEWARP6MIN_INTERVAL="${ROTATEWARP6MIN_INTERVAL:-360}"
-PARALLEL_PROBES="${PARALLEL_PROBES:-10}"
+# REMOVED: PARALLEL_PROBES="${PARALLEL_PROBES:-10}"
 
 mkdir -p "${LOG_DIR}" "${SUB_DIR}" "${XRAY_DIR}"
 
