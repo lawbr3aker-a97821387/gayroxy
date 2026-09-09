@@ -234,6 +234,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: End the action
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh api -X POST "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
   retrigger:
     needs: assets
     runs-on: ubuntu-latest
