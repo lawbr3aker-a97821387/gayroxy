@@ -79,7 +79,7 @@ jobs:
           curl -sSf --max-time 30 -k "$WORKER_URL" >/dev/null
       - name: 📤 Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: proxy-assets
           path: |
@@ -174,7 +174,7 @@ jobs:
           wait $SERVE_PID
       - name: 📤 Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: handover-logs
           path: |
