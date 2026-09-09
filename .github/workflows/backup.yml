@@ -143,12 +143,11 @@ jobs:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
           AUTO_RETRIGGER: "0"
-          HEALTH_AGENT: "1"
+          HEALTH_AGENT: "0"
           ROTATEWARP2MIN_INTERVAL: "120"
           ROTATEWARP4MIN_INTERVAL: "240"
           ROTATEWARP6MIN_INTERVAL: "360"
           PARALLEL_PROBES: "10"
-          HEALTH_TIMEOUT: "10"
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -172,22 +171,23 @@ jobs:
           done
           echo "Tunnel deployed."
 
-          # Cleanup stale runs every 60s
+          # Cleanup stale runs
           set +e
           {
-            while sleep 60; do
-              gh run list 100 --workflow "Build Deploy Proxy (Backup)" \
-                --json status,databaseId \
-                --jq '.[] | select(.status != "in_progress") | select(.databaseId != ${{ github.run_id }}) | .databaseId' \
-                2>/dev/null | xargs -I{} gh api \
-                  "repos/${{ github.repository }}/actions/runs/{}" -f force=true 2>/dev/null || true
-            done
-          } &
-          CLEANUP_PID=$!
+            gh run list -L 100 --workflow "Build & Deploy Proxy" \
+              --json status,databaseId \
+              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+            gh run list -L 100 --workflow "Proxy Handover" \
+              --json status,databaseId \
+              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+          } | sort -u \
+            | grep -v "${{ github.run_id }}" \
+            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+          set -e
+          echo "Cleanup completed."
 
           trap 'kill $SERVE_PID $CLEANUP_PID 2>/dev/null; wait; exit 0' TERM
           wait "$SERVE_PID"
-          kill $CLEANUP_PID 2>/dev/null || true
 
       - name: 📤 Upload artifacts
         if: always()
@@ -210,16 +210,9 @@ jobs:
     steps:
       - name: Dispatch Build Deploy Proxy
         run: |
-          SLEEP_SEC="$(( (RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN) * 60 ))"
-          echo "Will dispatch 'Build Deploy Proxy' workflow in ${SLEEP_SEC}s..."
-          sleep "${SLEEP_SEC}"
-
-          # Cleanup stale runs before dispatching
-          gh run list 100 --workflow "Build Deploy Proxy" \
-            --json status,databaseId \
-            --jq '.[] | select(.status != "in_progress") | select(.databaseId != ${{ github.run_id }}) | .databaseId' \
-            2>/dev/null | xargs -I{} gh api \
-              "repos/${{ github.repository }}/actions/runs/{}" -f force=true 2>/dev/null || true
+          SLEEP_MIN="$(( RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN ))"
+          echo "Will dispatch 'Build Deploy Proxy' workflow in ${SLEEP_MIN}m..."
+          sleep "${SLEEP_MIN}"
 
           gh workflow run "Build Deploy Proxy" --ref master
           echo "Dispatched."
