@@ -532,25 +532,9 @@ else
     exit 1
 fi
 
-# ─── LIVE_DEPLOY — publish live assets to Cloudflare (tunnel now up) ─────────
-# (The workflow's old run-end Publish step published a dying URL — removed.)
-# deploy-cf.sh is idempotent and binds the SAME derived API_TOKEN (exported in
-# common.sh) to the Worker, matching what the health agent sends.
-if [[ "$LIVE_DEPLOY" == "1" && "$RENDER_ONLY" != "1" ]]; then
-    log "LIVE_DEPLOY — publishing live assets to Cloudflare (tunnel: ${DOMAIN})..."
-    if [[ -z "${CF_TOKEN:-}" ]]; then
-        warn "LIVE_DEPLOY set but CF_TOKEN missing — skipping Cloudflare push."
-        warn "(The deploy step in CI normally provides CF_TOKEN.)"
-    else
-        if "${SCRIPT_DIR}/scripts/publish/deploy-cf.sh"; then
-            log "Live assets published: sub.txt now points at https://${DOMAIN}"
-        else
-            warn "deploy-cf.sh failed — live URL not published (see logs above)."
-        fi
-    fi
-fi
-
-if [[ "$RENDER_ONLY" != "1" && "$HEALTH_AGENT" == "1" ]]; then
+if [[ -z "${CF_TOKEN:-}" ]]; then
+    warn "CF_TOKEN missing for ROTATING_WARP — skipping..."
+else
     # Register free Cloudflare WARP identities BEFORE the health agent generates
     # the aux xray configs, so its wireguard outbounds use real planes when
     # available (degrades to direct only if registration fails).
@@ -594,7 +578,6 @@ watchdog &
 WATCHDOG_PID=$!
 
 FLAG_DEPLOYED_FILE="/tmp/flag-deployed"
-
 true > "$FLAG_DEPLOYED_FILE"
 log "Deployed flag"
 

@@ -16,6 +16,8 @@ env:
   WORKER_URL: ${{ vars.WORKER_URL }}
   WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
   TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE || 'ai-masters.ir' }}
+  RUN_TIMEOUT_MIN: 285
+  RETRIGGER_LEAD_MIN: 5
 
 jobs:
   assets:
@@ -87,7 +89,7 @@ jobs:
   serve:
     needs: assets
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ env.RUN_TIMEOUT_MIN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,15 +127,6 @@ jobs:
         env:
           EXTERNAL_SUB_URLS: ${{ env.EXTERNAL_SUB_URLS }}
           WORKER_URL: ${{ env.WORKER_URL }}
-          AUTO_RETRIGGER: "0"
-          RUN_TIMEOUT_MIN: "6"
-          RETRIGGER_LEAD_MIN: "1"
-          LIVE_DEPLOY: "1"
-          HEALTH_AGENT: "1"
-          HEALTH_INTERVAL: "600"
-          ROTATE1MIN_INTERVAL: "60"
-          ROTATE2MIN_INTERVAL: "120"
-          ROTATE5MIN_INTERVAL: "300"
           ROTATEWARP2MIN_INTERVAL: "120"
           ROTATEWARP4MIN_INTERVAL: "240"
           ROTATEWARP6MIN_INTERVAL: "360"
@@ -143,13 +136,39 @@ jobs:
           TUNNEL_ZONE: ${{ env.TUNNEL_ZONE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SEED: "${{ secrets.CF_TOKEN || github.repository }}"
+          FLAG_DEPLOYED_FILE: "/tmp/flag-deployed"
         run: |
           mkdir -p logs
           set -o pipefail
           if [[ -d render-assets/sub ]]; then cp -r render-assets/sub/. sub/ 2>/dev/null || true; fi
+
           echo "::group::Serve Output"
-          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log
+          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
+          SERVE_PID=$!
           echo "::endgroup::"
+
+          echo "Wait till the  apear"
+          while [ ! -f "$FLAG_DEPLOYED_FILE" ]; do
+              sleep 10
+          done
+
+          echo "Tunnel deployed"
+
+          set +e
+          {
+            gh run list -L 100 --workflow "Build & Deploy Proxy" \
+              --json status,databaseId \
+              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+            gh run list -L 100 --workflow "Proxy Handover" \
+              --json status,databaseId \
+              -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
+          } | sort -u \
+            | grep -v "${{ github.run_id }}" \
+            | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+          set -e
+          echo "Cleanup completed."
+
+          wait $SERVE_PID
       - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -165,13 +184,14 @@ jobs:
   retrigger:
     needs: assets
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ env.RUN_TIMEOUT_MIN }}
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Dispatch Handover
         run: |
-          echo "Will dispatch 'main.yml' workflow in 300 seconds..."
-          sleep 300
+          RETRIGGER_DELAY_MIN=${{ env.RUN_TIMEOUT_MIN - env.RETRIGGER_LEAD_MIN }}
+          echo "Will dispatch 'Build & Deploy Proxy' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
+          sleep ${{ env.RETRIGGER_DELAY_MIN }}
           gh workflow run main.yml --ref master
           echo "Dispatched."
