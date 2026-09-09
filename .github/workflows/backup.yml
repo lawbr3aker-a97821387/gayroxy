@@ -89,7 +89,7 @@ jobs:
   serve:
     needs: assets
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ RUN_TIMEOUT_MIN }}
+    timeout-minutes: 285
     steps:
       - uses: actions/checkout@v4
         with:
@@ -184,7 +184,7 @@ jobs:
   retrigger:
     needs: assets
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ RUN_TIMEOUT_MIN }}
+    timeout-minutes: 285
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
