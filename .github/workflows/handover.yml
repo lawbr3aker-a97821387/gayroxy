@@ -193,5 +193,5 @@ jobs:
           RETRIGGER_DELAY_MIN=${{ env.RUN_TIMEOUT_MIN - env.RETRIGGER_LEAD_MIN }}
           echo "Will dispatch 'Build & Deploy Proxy' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
           sleep ${{ env.RETRIGGER_DELAY_MIN }}
-          gh workflow run main.yml --ref master
+          gh workflow run 'Build & Deploy Proxy' --ref master
           echo "Dispatched."
