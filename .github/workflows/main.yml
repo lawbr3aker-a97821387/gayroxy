@@ -158,9 +158,9 @@ jobs:
           fi
 
           echo "::group::Serve Output"
-          setsid ./scripts/serve.sh 2>&1 | tee logs/run.log &
+          setsid ./scripts/serve.sh > >(tee logs/run.log) 2>&1 &
           SERVE_PID=$!
-          echo "SERVE_PID=$SERVE_PID" >> $GITHUB_ENV
+          echo "SERVE_PID=$SERVE_PID" >> "$GITHUB_ENV"
           echo "Tunnel PID: $SERVE_PID"
           echo "::endgroup::"
 
@@ -192,18 +192,18 @@ jobs:
               --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
               | sort \
               | grep -v "${{ github.run_id }}" \
-              | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+              | xargs -r -I{} gh api -X POST "/repos/${{ github.repository }}/actions/runs/{}/force-cancel"
             gh run list -L 100 --workflow "Build Deploy Proxy (Backup)" \
               --json status,databaseId \
               --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' \
               | sort \
               | grep -v "${{ github.run_id }}" \
-              | xargs -r -I{} gh api -X POST /repos/${{ github.repository }}/actions/runs/{}/force-cancel
+              | xargs -r -I{} gh api -X POST "/repos/${{ github.repository }}/actions/runs/{}/force-cancel"
           } >/dev/null 2>&1
           set -e
           echo "Cleanup completed."
 
-          trap 'kill $SERVE_PID $CLEANUP_PID 2>/dev/null; wait; exit 0' TERM
+          trap 'kill "$SERVE_PID" "$CLEANUP_PID" 2>/dev/null; wait; exit 0' TERM
           wait "$SERVE_PID"
 
       - name: Upload artifacts
