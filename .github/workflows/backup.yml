@@ -190,7 +190,7 @@ jobs:
     steps:
       - name: Dispatch Handover
         run: |
-          RETRIGGER_DELAY_MIN=${{ (env.RUN_TIMEOUT_MIN - env.RETRIGGER_LEAD_MIN) }}
+          RETRIGGER_DELAY_MIN=$(( RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN ))
           echo "Will dispatch 'Build & Deploy Proxy (Backup)' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
           sleep ${{ env.RETRIGGER_DELAY_MIN }}
           gh workflow run 'Build & Deploy Proxy (Backup)' --ref master
