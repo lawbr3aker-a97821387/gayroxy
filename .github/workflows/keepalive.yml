@@ -28,64 +28,64 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           MIN_AGE_SEC: 200
         run: |
-          set -uo pipefail
+            set -uo pipefail
 
-          mapfile -t run_ids < <(gh run list -L 100 --workflow "Build Deploy Proxy" \
-          --json status,databaseId \
-          --jq '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId')
+            mapfile -t run_ids < <(gh run list -L 100 --workflow "Build Deploy Proxy" \
+                --json status,databaseId \
+                --jq '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId')
 
-          echo "Found ${#run_ids[@]} in-progress/queued run(s): ${run_ids[*]:-none}"
+            echo "Found ${#run_ids[@]} in-progress/queued run(s): ${run_ids[*]:-none}"
 
-          pids=()
-          for id in "${run_ids[@]}"; do
-          {
-            started_at=$(gh run view "$id" --json startedAt --jq .startedAt)
-            if [[ -z "$started_at" || "$started_at" == "null" ]]; then
-            echo "[run $id] no startedAt yet, skipping this cycle"
-            exit 2
+            pids=()
+            for id in "${run_ids[@]}"; do
+            {
+                started_at=$(gh run view "$id" --json startedAt --jq .startedAt)
+                if [[ -z "$started_at" || "$started_at" == "null" ]]; then
+                echo "[run $id] no startedAt yet, skipping this cycle"
+                exit 2
+                fi
+
+                elapsed=$(( $(date -u +%s) - $(date -d "$started_at" +%s) ))
+                echo "[run $id] elapsed=${elapsed}s"
+                if (( elapsed < MIN_AGE_SEC )); then
+                echo "[run $id] too young, sleeping $(( MIN_AGE_SEC - elapsed ))s before checking"
+                sleep $(( MIN_AGE_SEC - elapsed ))
+                fi
+
+                tmp_dir=$(mktemp -d)
+                if ! gh run download "$id" --dir "$tmp_dir"; then
+                echo "[run $id] artifact download failed (maybe no artifacts yet)"
+                rm -rf "$tmp_dir"
+                exit 2
+                fi
+
+                if find "$tmp_dir" -name flag-deployed -print -quit | grep -q .; then
+                echo "[run $id] healthy — flag-deployed found"
+                rm -rf "$tmp_dir"
+                exit 0
+                fi
+
+                echo "[run $id] UNHEALTHY — no flag-deployed artifact, force-cancelling"
+                gh api -X POST "/repos/${GITHUB_REPOSITORY}/actions/runs/${id}/force-cancel"
+                rm -rf "$tmp_dir"
+                exit 1
+            } &
+            pids+=("$!")
+            done
+
+            ok=0 cancelled=0 skipped=0
+            for pid in "${pids[@]}"; do
+                wait "$pid"
+                case $? in
+                0) ok=$((ok+1)) ;;
+                1) cancelled=$((cancelled+1)) ;;
+                *) skipped=$((skipped+1)) ;;
+                esac
+            done
+
+            echo "Summary: ok=$ok cancelled=$cancelled skipped=$skipped"
+
+            if (( ok == 0 )); then
+                echo "No healthy runs left — triggering workflow."
+                gh workflow run "Build Deploy Proxy"
             fi
-
-            elapsed=$(( $(date -u +%s) - $(date -d "$started_at" +%s) ))
-            echo "[run $id] elapsed=${elapsed}s"
-            if (( elapsed < MIN_AGE_SEC )); then
-            echo "[run $id] too young, sleeping $(( MIN_AGE_SEC - elapsed ))s before checking"
-            sleep $(( MIN_AGE_SEC - elapsed ))
-            fi
-
-            tmp_dir=$(mktemp -d)
-            if ! gh run download "$id" --dir "$tmp_dir"; then
-            echo "[run $id] artifact download failed (maybe no artifacts yet)"
-            rm -rf "$tmp_dir"
-              exit 2
-              fi
-
-              if find "$tmp_dir" -name flag-deployed -print -quit | grep -q .; then
-              echo "[run $id] healthy — flag-deployed found"
-              rm -rf "$tmp_dir"
-              exit 0
-              fi
-
-              echo "[run $id] UNHEALTHY — no flag-deployed artifact, force-cancelling"
-              gh api -X POST "/repos/${GITHUB_SITORY}/actions/runs/${id}/force-cancel"
-              rm -rf "$tmp_dir"
-              exit 1
-          } &
-          pids+=("$!")
-          done
-
-          ok=0 cancelled=0 skipped=0
-          for pid in "${pids[@]}"; do
-          wait "$pid"
-          case $? in
-              0) ((ok++)) ;;
-              1) ((cancelled++)) ;;
-              *) ((skipped++)) ;;
-          esac
-          done
-
-          echo "Summary: ok=$ok cancelled=$cancelled skipped=$skipped"
-
-          if (( ok == 0 )); then
-          echo "No healthy runs left — triggering workflow."
-          gh workflow run "Build Deploy Proxy"
-          fi

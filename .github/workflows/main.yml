@@ -149,6 +149,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           SEED: "${{ secrets.CF_TOKEN }}${{ github.repository }}"
           FLAG_DEPLOYED_FILE: "/tmp/flag-deployed"
+          FLAG_DEPLOYED_TIMEOUT_SEC: 200
         run: |
           mkdir -p logs
           set -o pipefail
@@ -166,9 +167,19 @@ jobs:
           echo "::endgroup::"
 
           echo "Waiting for tunnel to deploy..."
+          echo "Waiting for tunnel to deploy (timeout: ${DEPLOY_TIMEOUT_SEC}s)..."
+          SECONDS_WAITED=0
           while [[ ! -f "$FLAG_DEPLOYED_FILE" ]]; do
+            if (( SECONDS_WAITED >= FLAG_DEPLOYED_TIMEOUT_SEC )); then
+              echo "::error::Timed out after ${FLAG_DEPLOYED_TIMEOUT_SEC}s waiting for $FLAG_DEPLOYED_FILE"
+              # kill the background serve process so it doesn't linger
+              kill "$SERVE_PID" 2>/dev/null || true
+              exit 1
+            fi
             sleep 10
+            SECONDS_WAITED=$(( SECONDS_WAITED + 10 ))
           done
+          echo "Tunnel deployed."
           echo "Tunnel deployed."
 
       - name: Upload flag deployed
