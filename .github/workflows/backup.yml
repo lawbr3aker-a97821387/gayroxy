@@ -17,8 +17,6 @@ env:
   WORKER_URL: ${{ vars.WORKER_URL }}
   WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN }}
   TUNNEL_ZONE: ${{ vars.TUNNEL_ZONE }}
-  RUN_TIMEOUT_MIN: "285"
-  RETRIGGER_LEAD_MIN: "5"
 
 jobs:
   assets:
@@ -167,6 +165,20 @@ jobs:
           done
           echo "Tunnel deployed."
 
+      - name: Upload flag deployed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upload
+          path: |
+            /tmp/flag-deployed
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Cleanup and wait
+        run: |
+          sleep 20
+
           # Cleanup stale runs (any older in-progress main/backup run)
           set +e
           {
@@ -204,14 +216,17 @@ jobs:
   retrigger:
     needs: assets
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 285
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Dispatch main workflow
         run: |
-          SLEEP_MIN=$((RUN_TIMEOUT_MIN - RETRIGGER_LEAD_MIN))
+          SLEEP_MIN=280
           echo "Will dispatch 'Build Deploy Proxy' workflow in ${SLEEP_MIN}m..."
           sleep "${SLEEP_MIN}m"
           gh workflow run "Build Deploy Proxy" --ref master
           echo "Dispatched main."
+          sleep 10
+          gh workflow run "Keepalive Watchdog" --ref master
+          echo "Keepalive triggered."
