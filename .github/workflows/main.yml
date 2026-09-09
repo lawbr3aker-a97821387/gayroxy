@@ -163,7 +163,7 @@ jobs:
             gh run list -L 100 --workflow "Build & Deploy Proxy" \
               --json status,databaseId \
               -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
-            gh run list -L 100 --workflow "Proxy Handover" \
+            gh run list -L 100 --workflow "Build & Deploy Proxy (Backup)" \
               --json status,databaseId \
               -q '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId'
           } | sort -u \
