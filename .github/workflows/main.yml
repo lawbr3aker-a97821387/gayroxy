@@ -1,4 +1,4 @@
-name: "Build Deploy Proxy"
+name: "Build & Deploy Proxy"
 
 concurrency:
   group: gayroxy-deploy-${{ github.run_id }}
@@ -194,7 +194,7 @@ jobs:
       - name: Dispatch Handover
         run: |
           RETRIGGER_DELAY_MIN=${{ (env.RUN_TIMEOUT_MIN - env.RETRIGGER_LEAD_MIN) }}
-          echo "Will dispatch 'Deploy Proxy' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
+          echo "Will dispatch 'Build & Deploy Proxy' workflow in ${{ RETRIGGER_DELAY_MIN }} minutes..."
           sleep ${{ env.RETRIGGER_DELAY_MIN }}
-          gh workflow run 'Deploy Proxy' --ref master
+          gh workflow run 'Build & Deploy Proxy' --ref master
           echo "Dispatched."
