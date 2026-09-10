@@ -52,12 +52,8 @@ jobs:
               sleep $(( MIN_AGE_SEC - elapsed ))
             fi
 
-            names=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$id/artifacts?per_page=100" \
-                      --jq '.artifacts[].name' 2>/dev/null) || {
-              echo "[run $id] could not query artifacts — skipping this cycle"
-              exit 2
-            }
-            if grep -qx "flag-deployed" <<<"$names"; then
+            if gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$id/artifacts?per_page=100" \
+                 --jq '.artifacts[].name' 2>/dev/null | grep -qx "flag-deployed"; then
               echo "[run $id] healthy — flag-deployed found"
               exit 0
             fi
