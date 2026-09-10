@@ -183,14 +183,12 @@ jobs:
           echo "Tunnel deployed."
 
       - name: Upload flag deployed
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: upload
           path: |
             /tmp/flag-deployed
-          if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
       - name: Cleanup and wait
         run: |
@@ -236,11 +234,16 @@ jobs:
 
       - name: End the action
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          echo "Ended, Canceling the action..."
-          gh api -X POST "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+          true > /tmp/flag-ended
+
+      - name: Upload flag ended
+        uses: actions/upload-artifact@v4
+        with:
+          name: upload
+          path: |
+            /tmp/flag-ended
+          retention-days: 1
 
   retrigger:
     needs: assets
@@ -251,11 +254,22 @@ jobs:
     steps:
       - name: Dispatch main workflow
         run: |
-          SLEEP_MIN=280
-          echo "Will dispatch 'Build Deploy Proxy' workflow in ${SLEEP_MIN}m..."
-          sleep "${SLEEP_MIN}m"
+          MAX_DELAY_SEC=$((270 * 60))
+          POLL_INTERVAL_SEC=60
+
+          echo "Waiting, polling every ${POLL_INTERVAL_SEC}s for flag-ended..."
+
+          start_epoch=$(date +%s)
+          while (( $(date +%s) - start_epoch < MAX_DELAY_SEC )); do
+            if gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+                 --jq '.artifacts[].name' 2>/dev/null | grep -qx "flag-ended"; then
+              break
+            fi
+            sleep "$POLL_INTERVAL_SEC"
+          done
+
           gh workflow run "Build Deploy Proxy" --ref master
           echo "Dispatched main."
-          sleep 10
+          sleep 5
           gh workflow run "Keepalive Watchdog" --ref master
           echo "Keepalive triggered."
