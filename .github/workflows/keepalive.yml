@@ -52,22 +52,18 @@ jobs:
               sleep $(( MIN_AGE_SEC - elapsed ))
             fi
 
-            tmp_dir=$(mktemp -d)
-            if ! gh run download "$id" --dir "$tmp_dir"; then
-              echo "[run $id] artifact download failed (maybe no artifacts yet)"
-              rm -rf "$tmp_dir"
+            names=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$id/artifacts?per_page=100" \
+                      --jq '.artifacts[].name' 2>/dev/null) || {
+              echo "[run $id] could not query artifacts — skipping this cycle"
               exit 2
-            fi
-
-            if find "$tmp_dir" -name flag-deployed -print -quit | grep -q .; then
+            }
+            if grep -qx "flag-deployed" <<<"$names"; then
               echo "[run $id] healthy — flag-deployed found"
-              rm -rf "$tmp_dir"
               exit 0
             fi
 
             echo "[run $id] UNHEALTHY — no flag-deployed artifact, force-cancelling"
             gh api -X POST "/repos/${GITHUB_REPOSITORY}/actions/runs/${id}/force-cancel"
-            rm -rf "$tmp_dir"
             exit 1
           } &
           pids+=("$!")
@@ -87,5 +83,5 @@ jobs:
 
           if (( ok == 0 )); then
             echo "No healthy runs left — triggering workflow."
-            gh workflow run "Build Deploy Proxy"
+            gh workflow run "Build Deploy Proxy" --ref master
           fi

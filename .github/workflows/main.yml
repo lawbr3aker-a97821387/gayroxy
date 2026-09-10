@@ -2,7 +2,6 @@ name: "Build Deploy Proxy"
 
 concurrency:
   group: gayroxy-deploy-main-${{ github.run_id }}
-  cancel-in-progress: true
 
 on:
   push:
@@ -161,14 +160,13 @@ jobs:
           fi
 
           echo "::group::Serve Output"
-          setsid ./scripts/serve.sh > >(tee logs/run.log) 2>&1 &
+          setsid bash -c './scripts/serve.sh 2>&1 | tee logs/run.log' &
           SERVE_PID=$!
           echo "SERVE_PID=$SERVE_PID" >> "$GITHUB_ENV"
           echo "Tunnel PID: $SERVE_PID"
           echo "::endgroup::"
 
-          echo "Waiting for tunnel to deploy..."
-          echo "Waiting for tunnel to deploy (timeout: ${DEPLOY_TIMEOUT_SEC}s)..."
+          echo "Waiting for tunnel to deploy (timeout: ${FLAG_DEPLOYED_TIMEOUT_SEC}s)..."
           SECONDS_WAITED=0
           while [[ ! -f "$FLAG_DEPLOYED_FILE" ]]; do
             if (( SECONDS_WAITED >= FLAG_DEPLOYED_TIMEOUT_SEC )); then
@@ -185,7 +183,7 @@ jobs:
       - name: Upload flag deployed
         uses: actions/upload-artifact@v4
         with:
-          name: upload
+          name: flag-deployed
           path: |
             /tmp/flag-deployed
           retention-days: 1
@@ -213,7 +211,7 @@ jobs:
           set -e
           echo "Cleanup completed."
 
-          trap 'kill "$SERVE_PID" "$CLEANUP_PID" 2>/dev/null; wait; exit 0' TERM
+          trap 'kill "$SERVE_PID" 2>/dev/null; wait; exit 0' TERM
           # Poll instead of wait — SERVE_PID is not a child of this shell
           while kill -0 "$SERVE_PID" 2>/dev/null; do
             sleep 10
@@ -238,9 +236,10 @@ jobs:
           true > /tmp/flag-ended
 
       - name: Upload flag ended
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: upload
+          name: flag-ended
           path: |
             /tmp/flag-ended
           retention-days: 1
