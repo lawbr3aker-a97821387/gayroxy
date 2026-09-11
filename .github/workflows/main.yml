@@ -160,7 +160,7 @@ jobs:
           fi
 
           echo "::group::Serve Output"
-          setsid bash -c './scripts/serve.sh 2>&1 | tee logs/run.log' &
+          setsid bash -c './scripts/serve.sh < /dev/null > logs/run.log 2>&1' &
           SERVE_PID=$!
           echo "SERVE_PID=$SERVE_PID" >> "$GITHUB_ENV"
           echo "Tunnel PID: $SERVE_PID"
@@ -218,6 +218,19 @@ jobs:
           done
           echo "Serve process ($SERVE_PID) has exited."
 
+      # - name: End the action
+      #   if: always()
+      #   run: |
+      #     true > /tmp/flag-ended
+      #
+      # - name: Upload flag ended
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: flag-ended
+      #     path: |
+      #       /tmp/flag-ended
+      #     retention-days: 1
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -230,19 +243,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: End the action
+      - name: Cancel and retrigger
         if: always()
         run: |
-          true > /tmp/flag-ended
+          gh workflow run "Build Deploy Proxy" --ref master
+          echo "Dispatched main."
 
-      - name: Upload flag ended
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flag-ended
-          path: |
-            /tmp/flag-ended
-          retention-days: 1
+          echo "Canceling the run"
+          gh api -X POST "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel"
 
   retrigger:
     needs: assets
@@ -253,22 +261,11 @@ jobs:
     steps:
       - name: Dispatch main workflow
         run: |
-          MAX_DELAY_SEC=$((270 * 60))
-          POLL_INTERVAL_SEC=60
-
-          echo "Waiting, polling every ${POLL_INTERVAL_SEC}s for flag-ended..."
-
-          start_epoch=$(date +%s)
-          while (( $(date +%s) - start_epoch < MAX_DELAY_SEC )); do
-            if gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-                 --jq '.artifacts[].name' 2>/dev/null | grep -qx "flag-ended"; then
-              break
-            fi
-            sleep "$POLL_INTERVAL_SEC"
-          done
+          MAX_DELAY_MIN=270
+          sleep "{$MAX_DELAY_MIN}m"
 
           gh workflow run "Build Deploy Proxy" --ref master
           echo "Dispatched main."
-          sleep 5
-          gh workflow run "Keepalive Watchdog" --ref master
-          echo "Keepalive triggered."
+          # sleep 5
+          # gh workflow run "Keepalive Watchdog" --ref master
+          # echo "Keepalive triggered."
